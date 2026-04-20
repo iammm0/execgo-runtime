@@ -1,0 +1,49 @@
+name: Release build
+
+# 预发布/验证：在推送版本标签时构建 release 二进制并上传 Artifact（非 GitHub Release 资产）。
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: cargo build --release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: execgo-runtime-linux-x86_64
+          - os: macos-latest
+            artifact_name: execgo-runtime-macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/release/execgo-runtime "staging/${{ matrix.artifact_name }}"
+          chmod +x "staging/${{ matrix.artifact_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/${{ matrix.artifact_name }}
