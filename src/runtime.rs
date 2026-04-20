@@ -1142,15 +1142,14 @@ fn oom_killed(_cgroup_dir: Option<&Path>) -> bool {
             if let Ok(contents) = fs::read_to_string(path) {
                 for line in contents.lines() {
                     let mut parts = line.split_whitespace();
-                    if matches!(parts.next(), Some("oom_kill")) {
-                        if parts
+                    if matches!(parts.next(), Some("oom_kill"))
+                        && parts
                             .next()
                             .and_then(|value| value.parse::<u64>().ok())
                             .unwrap_or_default()
                             > 0
-                        {
-                            return true;
-                        }
+                    {
+                        return true;
                     }
                 }
             }
