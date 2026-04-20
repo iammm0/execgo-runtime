@@ -1,24 +1,73 @@
 # execgo-runtime
 
-`execgo-runtime` 是 ExecGo 生态中的**数据面运行时**：用 Rust 实现异步任务提交、调度、执行与持久化，对外提供 HTTP API 与配套 CLI，适合作为 ExecGo 控制面背后的执行后端。
+[![CI](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml)
+[![Rust Edition](https://img.shields.io/badge/rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+[![Crates.io](https://img.shields.io/badge/crates.io-未发布-lightgrey.svg)](https://crates.io/)
 
-**当前版本**：`1.0.0-b1`（预发布 beta，见 [发行说明](docs/deployment.md#版本与标签)）。
+ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交、调度、执行与持久化，对外提供 **HTTP API** 与 **CLI**，可作为 ExecGo 控制面背后的执行后端。
 
-## 功能概览
+**当前版本**：`1.0.0-b1`（预发布，行为与 API 仍可能调整；详见 [版本与标签](docs/deployment.md#版本与标签)）。
+
+---
+
+## 目录
+
+- [简介](#简介)
+- [功能特性](#功能特性)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [配置与环境变量](#配置与环境变量)
+- [HTTP API 概览](#http-api-概览)
+- [与 ExecGo 集成](#与-execgo-集成)
+- [文档](#文档)
+- [参与贡献](#参与贡献)
+- [安全](#安全)
+- [许可证](#许可证)
+
+---
+
+## 简介
+
+`execgo-runtime` 在单进程中托管 HTTP 服务，通过 SQLite（WAL）与任务目录持久化状态；调度器将队列中的任务派发到 **internal shim** 子进程执行用户命令或脚本。支持健康检查、就绪探针、Prometheus 指标，以及任务取消与超时控制。Linux 上可选用 `linux_sandbox` 与 cgroup 等能力（详见 [架构说明](docs/architecture.md)）。
+
+## 功能特性
 
 | 能力 | 说明 |
 |------|------|
 | HTTP API | 提交任务、查询状态、取消、事件流、健康检查、Prometheus 指标 |
-| CLI | `serve` / `submit` / `status` / `wait` / `kill` / `run`，封装远程 API |
-| 持久化 | SQLite（WAL）存储任务元数据；任务目录下保存 `request.json`、`result.json`、stdout/stderr |
-| 调度与恢复 | 独立 **shim** 子进程执行任务；运行时重启后可对 `running` 任务做恢复标记 |
-| 资源与沙箱 | 进程级默认；Linux 上可选 `linux_sandbox`（命名空间、cgroup 等，见文档） |
+| CLI | `serve` / `submit` / `status` / `wait` / `kill` / `run` |
+| 持久化 | SQLite 元数据；`tasks/<id>/` 下 `request.json`、`result.json`、stdout/stderr |
+| 调度与恢复 | shim 子进程执行；重启后可对非终态任务做恢复相关处理 |
+| 资源与沙箱 | 默认进程级；Linux 可选 `linux_sandbox`（命名空间、cgroup 等） |
 
 ## 环境要求
 
-- **Rust**：1.74+（建议使用当前 stable）
-- **操作系统**：开发与测试以 **macOS / Linux** 为主；**沙箱与 cgroup 相关能力仅在 Linux** 上完整可用
-- **Unix**：进程组、信号、`wait4` 等依赖类 Unix 环境（Windows 未作为目标平台）
+| 项目 | 说明 |
+|------|------|
+| Rust | **1.74+**（建议当前 stable，与 CI 一致） |
+| 操作系统 | 开发与 CI 覆盖 **Linux、macOS**；**沙箱 / cgroup 完整能力仅在 Linux** |
+| 平台 | 依赖 Unix 进程组、信号、`wait4` 等；**Windows 非目标平台** |
+
+## 安装
+
+### 从源码构建（推荐）
+
+```bash
+git clone https://github.com/iammm0/execgo-runtime.git
+cd execgo-runtime
+cargo build --release
+# 二进制：target/release/execgo-runtime
+```
+
+### 容器镜像（可选）
+
+```bash
+docker build -t execgo-runtime:local .
+docker run --rm -p 8080:8080 -v execgo-data:/data execgo-runtime:local
+```
+
+默认监听 `0.0.0.0:8080`，数据目录 `/data`。详见 [部署说明](docs/deployment.md)。
 
 ## 快速开始
 
@@ -35,7 +84,7 @@ cargo test
 cargo run -- serve --listen-addr 127.0.0.1:8080 --data-dir ./data
 ```
 
-数据目录中会生成 `runtime.db`（SQLite）以及 `tasks/<task_id>/` 任务文件。
+数据目录下会生成 `runtime.db` 与 `tasks/<task_id>/`。
 
 ### 提交示例任务
 
@@ -43,29 +92,38 @@ cargo run -- serve --listen-addr 127.0.0.1:8080 --data-dir ./data
 cargo run -- submit --json '{"execution":{"kind":"command","program":"/bin/sh","args":["-c","echo hello"]}}'
 ```
 
-### 一键演示脚本
+### 一键演示
 
 ```bash
 chmod +x scripts/quickstart.sh
 ./scripts/quickstart.sh
 ```
 
-脚本会临时目录起服务、提交任务并打印结果，退出时自动清理。
+在临时目录启动服务、提交任务并等待结束，退出时清理。
 
-## CLI 速查
+### CLI 速查
 
 | 子命令 | 作用 |
 |--------|------|
-| `serve` | 启动 HTTP 服务（见 `serve --help`） |
+| `serve` | 启动 HTTP 服务（`serve --help` 查看全部参数） |
 | `submit` | 提交任务（`--json` 或 `--file`） |
 | `status <task_id>` | 查询状态 |
-| `wait <task_id>` | 轮询直到终态（可 `--timeout-ms`） |
+| `wait <task_id>` | 轮询至终态（可选 `--timeout-ms`） |
 | `kill <task_id>` | 请求取消 |
-| `run` | 提交并等待完成（组合 `submit` + `wait`） |
+| `run` | 提交并等待完成（`submit` + `wait`） |
 
-默认服务地址：`--server http://127.0.0.1:8080`。
+默认 `--server http://127.0.0.1:8080`。
 
-## HTTP 端点
+## 配置与环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `RUST_LOG` | 日志级别，如 `info`、`debug`；未设置时由程序默认 `tracing` 配置 |
+| `EXECGO_RUNTIME_URL` | **在 ExecGo 控制面**配置：指向本服务根 URL（无尾斜杠亦可） |
+
+服务端常用参数见 [CLI 文档](docs/cli.md)（并发上限、队列长度、GC、grace 时间等）。
+
+## HTTP API 概览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -73,32 +131,52 @@ chmod +x scripts/quickstart.sh
 | `GET` | `/api/v1/tasks/:id` | 任务状态（含输出片段） |
 | `POST` | `/api/v1/tasks/:id/kill` | 取消 |
 | `GET` | `/api/v1/tasks/:id/events` | 事件列表 |
-| `GET` | `/healthz` | 存活探测（含版本） |
-| `GET` | `/readyz` | 就绪（校验存储可用） |
-| `GET` | `/metrics` | Prometheus 文本指标 |
+| `GET` | `/healthz` | 存活（响应中含 `version`） |
+| `GET` | `/readyz` | 就绪（校验存储） |
+| `GET` | `/metrics` | Prometheus 文本 |
 
-请求/响应 JSON 模型见 [API 参考](docs/api.md)。
+完整 JSON 模型与示例见 [API 参考](docs/api.md)。
 
 ## 与 ExecGo 集成
 
-在 ExecGo 侧配置环境变量 **`EXECGO_RUNTIME_URL`**，指向正在监听的 `execgo-runtime` 服务根地址（例如 `http://127.0.0.1:8080`）。控制面通过该 URL 调用上述 HTTP API。
+在 ExecGo 中设置环境变量：
 
-## 文档目录
+```text
+EXECGO_RUNTIME_URL=http://127.0.0.1:8080
+```
+
+指向正在运行的 `execgo-runtime` 根地址；控制面通过该 URL 调用上述 API。
+
+## 文档
 
 | 文档 | 内容 |
 |------|------|
 | [docs/README.md](docs/README.md) | 文档索引 |
 | [docs/architecture.md](docs/architecture.md) | 架构与执行流程 |
-| [docs/api.md](docs/api.md) | HTTP API 与 JSON 模型 |
-| [docs/cli.md](docs/cli.md) | 命令行参数说明 |
-| [docs/deployment.md](docs/deployment.md) | 部署、容器、CI/CD、版本标签 |
-| [docs/development.md](docs/development.md) | 本地开发、测试、贡献约定 |
+| [docs/api.md](docs/api.md) | HTTP API 与 JSON |
+| [docs/cli.md](docs/cli.md) | 命令行参数 |
+| [docs/deployment.md](docs/deployment.md) | 部署、Docker、CI/CD、标签 |
+| [docs/development.md](docs/development.md) | 本地开发、测试、风格 |
 
-## 仓库与协作
+## 参与贡献
 
-- **源码**：<https://github.com/iammm0/execgo-runtime.git>
-- 问题反馈与 PR 欢迎通过 GitHub 进行。
+欢迎通过 [Issues](https://github.com/iammm0/execgo-runtime/issues) 反馈缺陷与需求，通过 Pull Request 提交改动。
+
+建议流程：
+
+1. Fork 本仓库，从 `main` 创建分支。
+2. 本地执行 `cargo fmt`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`。
+3. 提交信息清晰说明**动机与行为变化**（可与 [development.md](docs/development.md) 对齐）。
+4. 发起 PR，等待 CI 通过后再合并。
+
+## 安全
+
+若你认为发现了安全漏洞，请**不要**在公开 Issue 中讨论；请通过仓库维护者提供的私密渠道报告（可在 GitHub 用户主页或组织说明中查找联系方式）。在未有 `SECURITY.md` 前，也可先开 **私有** 沟通渠道联系维护者。
 
 ## 许可证
 
-若仓库根目录包含 `LICENSE` 文件，以该文件为准；否则请向维护者确认授权条款。
+仓库根目录若包含 `LICENSE` 文件，以该文件为准。**当前若尚未添加许可证文件**，复制、分发与再许可条件请向维护者确认；也欢迎通过 Issue 推动明确的开源许可证选型。
+
+---
+
+**仓库**：<https://github.com/iammm0/execgo-runtime>
