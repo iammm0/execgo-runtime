@@ -216,8 +216,8 @@ fn detect_memory_bytes() -> Option<u64> {
 fn detect_pids_capacity() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        return read_to_string("/proc/sys/kernel/pid_max")
-            .and_then(|value| value.trim().parse::<u64>().ok());
+        read_to_string("/proc/sys/kernel/pid_max")
+            .and_then(|value| value.trim().parse::<u64>().ok())
     }
     #[cfg(not(target_os = "linux"))]
     {
