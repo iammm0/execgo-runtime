@@ -16,6 +16,8 @@
 
 - **存活**：`GET /healthz`
 - **就绪**：`GET /readyz`（验证存储可用）
+- **能力清单**：`GET /api/v1/runtime/capabilities`
+- **资源快照**：`GET /api/v1/runtime/resources`
 
 编排时可配置：
 
@@ -26,9 +28,25 @@
 
 `GET /metrics` 提供 Prometheus 文本。可在 Prometheus 中抓取该路径，或交给 Datadog/VictoriaMetrics 等兼容端点。
 
+若上层 ExecGo 需要根据宿主能力做调度/策略决策，建议同时拉取：
+
+- `/api/v1/runtime/info`
+- `/api/v1/runtime/capabilities`
+- `/api/v1/runtime/config`
+- `/api/v1/runtime/resources`
+
 ## Docker 示例
 
-仓库提供 `Dockerfile`（多阶段构建），快速原型用法：
+仓库提供 `Dockerfile`（多阶段构建），并通过 GitHub Actions 发布到 GitHub Container Registry（GHCR）。
+
+拉取已发布镜像：
+
+```bash
+docker pull ghcr.io/iammm0/execgo-runtime:latest
+docker run --rm -p 8080:8080 -v execgo-data:/data ghcr.io/iammm0/execgo-runtime:latest
+```
+
+本地快速原型用法：
 
 ```bash
 docker build -t execgo-runtime:local .
@@ -42,9 +60,15 @@ docker run --rm -p 8080:8080 -v execgo-data:/data execgo-runtime:local
 本仓库使用 **GitHub Actions**：
 
 - **CI**（`.github/workflows/ci.yml`）：在 push / PR 上执行 `fmt`、`clippy`、`test`。
+- **Container image**（`.github/workflows/container.yml`）：在 `main` / `master` 或版本标签 push 后构建 Docker 镜像并推送到 `ghcr.io/iammm0/execgo-runtime`。
 - **Release 构建**（`.github/workflows/release.yml`）：在推送以数字开头的版本标签（如 `1.0.0-b1`）时构建 Linux/macOS  release 二进制并上传 Artifact（预发布/验证用）。
 
 流水线定义以仓库内 YAML 为准。
+
+GHCR 标签策略：
+
+- 默认分支构建：`latest`、`main`（或对应分支名）、`sha-<commit>`。
+- 版本标签构建：原始 Git 标签（如 `1.0.0-b1`）和 `sha-<commit>`。
 
 ## 版本与标签
 

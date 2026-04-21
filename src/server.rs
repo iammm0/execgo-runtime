@@ -17,6 +17,10 @@ pub fn build_router(service: RuntimeService) -> Router {
         .route("/api/v1/tasks/:id", get(get_task))
         .route("/api/v1/tasks/:id/kill", post(kill_task))
         .route("/api/v1/tasks/:id/events", get(get_events))
+        .route("/api/v1/runtime/info", get(runtime_info))
+        .route("/api/v1/runtime/capabilities", get(runtime_capabilities))
+        .route("/api/v1/runtime/config", get(runtime_config))
+        .route("/api/v1/runtime/resources", get(runtime_resources))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -60,6 +64,30 @@ async fn healthz() -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn runtime_info(
+    State(service): State<RuntimeService>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(service.runtime_info().await))
+}
+
+async fn runtime_capabilities(
+    State(service): State<RuntimeService>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(service.runtime_capabilities().await))
+}
+
+async fn runtime_config(
+    State(service): State<RuntimeService>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(service.runtime_config().await))
+}
+
+async fn runtime_resources(
+    State(service): State<RuntimeService>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(service.runtime_resources().await?))
 }
 
 async fn readyz(State(service): State<RuntimeService>) -> Result<impl IntoResponse, AppError> {

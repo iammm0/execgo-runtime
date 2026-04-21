@@ -24,20 +24,26 @@ use tracing::{info, warn};
 use nix::unistd::{chdir, chroot};
 
 use crate::{
+    capabilities::{probe_runtime_capabilities, CapabilityProbeInput},
     cli::{Cli, Command, InternalShimArgs, RemoteTaskArgs, ServeArgs, StatusArgs, WaitArgs},
     error::{AppError, AppResult},
+    ledger::ResourceLedger,
     metrics::render_prometheus,
+    policy::resolve_execution_plan,
     repo::{generate_task_id, CompletionUpdate, Repository, TaskRecord},
     server::build_router,
     types::{
-        resolve_workspace_dir, ErrorCode, EventRecord, ExecutionKind, ResourceUsage,
-        RuntimeErrorInfo, SandboxProfile, SubmitTaskRequest, SubmitTaskResponse, TaskArtifacts,
-        TaskStatus, TaskStatusResponse,
+        resolve_workspace_dir, ActiveTaskReservation, CapabilityMode, ErrorCode, EventRecord,
+        ExecutionKind, ExecutionPlan, ResourceCapacity, ResourceEnforcementPlan, ResourceUsage,
+        RuntimeCapabilities, RuntimeConfigResponse, RuntimeErrorInfo, RuntimeInfoResponse,
+        RuntimeResourcesResponse, SubmitTaskRequest, SubmitTaskResponse, TaskArtifacts,
+        TaskResourceReservation, TaskStatus, TaskStatusResponse,
     },
 };
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub runtime_id: String,
     pub listen_addr: String,
     pub data_dir: PathBuf,
     pub tasks_dir: PathBuf,
@@ -49,6 +55,11 @@ pub struct Settings {
     pub gc_interval: Duration,
     pub dispatch_poll_interval: Duration,
     pub cgroup_root: PathBuf,
+    pub default_capability_mode: CapabilityMode,
+    pub disable_linux_sandbox: bool,
+    pub disable_cgroup: bool,
+    pub capacity_memory_bytes: Option<u64>,
+    pub capacity_pids: Option<u64>,
 }
 
 impl Settings {
@@ -57,6 +68,10 @@ impl Settings {
         let tasks_dir = data_dir.join("tasks");
         let database_path = data_dir.join("runtime.db");
         Self {
+            runtime_id: args
+                .runtime_id
+                .clone()
+                .unwrap_or_else(|| default_runtime_id(&args.listen_addr)),
             listen_addr: args.listen_addr.clone(),
             data_dir,
             tasks_dir,
@@ -68,6 +83,11 @@ impl Settings {
             gc_interval: Duration::from_millis(args.gc_interval_ms),
             dispatch_poll_interval: Duration::from_millis(args.dispatch_poll_interval_ms),
             cgroup_root: args.cgroup_root.clone(),
+            default_capability_mode: args.default_capability_mode,
+            disable_linux_sandbox: args.disable_linux_sandbox,
+            disable_cgroup: args.disable_cgroup,
+            capacity_memory_bytes: args.capacity_memory_bytes,
+            capacity_pids: args.capacity_pids,
         }
     }
 }
@@ -76,18 +96,36 @@ impl Settings {
 pub struct RuntimeService {
     settings: Arc<Settings>,
     repo: Repository,
+    capabilities: Arc<RuntimeCapabilities>,
+    ledger: Arc<ResourceLedger>,
+    started_at: chrono::DateTime<Utc>,
     dispatcher_notify: Arc<Notify>,
 }
 
 impl RuntimeService {
     pub async fn new(settings: Settings) -> AppResult<Self> {
+        let started_at = Utc::now();
         fs::create_dir_all(&settings.data_dir)?;
         fs::create_dir_all(&settings.tasks_dir)?;
         let repo = Repository::new(settings.database_path.clone());
         repo.init()?;
+        let capabilities = probe_runtime_capabilities(&CapabilityProbeInput {
+            runtime_id: settings.runtime_id.clone(),
+            data_dir: settings.data_dir.clone(),
+            cgroup_root: settings.cgroup_root.clone(),
+            max_running_tasks: settings.max_running_tasks,
+            disable_linux_sandbox: settings.disable_linux_sandbox,
+            disable_cgroup: settings.disable_cgroup,
+            capacity_memory_bytes: settings.capacity_memory_bytes,
+            capacity_pids: settings.capacity_pids,
+        });
+        let ledger = ResourceLedger::new(capabilities.resources.capacity.clone());
         Ok(Self {
             settings: Arc::new(settings),
             repo,
+            capabilities: Arc::new(capabilities),
+            ledger: Arc::new(ledger),
+            started_at,
             dispatcher_notify: Arc::new(Notify::new()),
         })
     }
@@ -100,13 +138,26 @@ impl RuntimeService {
         &self.repo
     }
 
+    pub fn capabilities(&self) -> Arc<RuntimeCapabilities> {
+        self.capabilities.clone()
+    }
+
     pub async fn submit_task(&self, request: SubmitTaskRequest) -> AppResult<SubmitTaskResponse> {
         request.validate()?;
+        let execution_plan = resolve_execution_plan(
+            &request,
+            &self.capabilities,
+            self.settings.default_capability_mode,
+        )?;
+        let requested_reservation = TaskResourceReservation::from_limits(&request.limits);
+        self.ledger.ensure_within_capacity(&requested_reservation)?;
+
         if self.repo.count_accepted()? >= self.settings.max_queued_tasks as u64 {
             return Err(AppError::QueueFull);
         }
 
         let task_id = request.task_id.clone().unwrap_or_else(generate_task_id);
+        let control_context = request.control_context.clone();
         let task_dir = self.settings.tasks_dir.join(&task_id);
         let workspace_dir = resolve_workspace_dir(&task_dir, &request.sandbox)?;
         let request_path = task_dir.join("request.json");
@@ -144,6 +195,8 @@ impl RuntimeService {
             stdout_path,
             stderr_path,
             script_path,
+            execution_plan,
+            control_context,
         })?;
         self.dispatcher_notify.notify_one();
 
@@ -209,6 +262,67 @@ impl RuntimeService {
         }
     }
 
+    pub async fn runtime_info(&self) -> RuntimeInfoResponse {
+        RuntimeInfoResponse {
+            runtime_id: self.settings.runtime_id.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            started_at: self.started_at,
+            snapshot_version: self.capabilities.snapshot_version.clone(),
+            platform: self.capabilities.platform.clone(),
+        }
+    }
+
+    pub async fn runtime_capabilities(&self) -> RuntimeCapabilities {
+        (*self.capabilities).clone()
+    }
+
+    pub async fn runtime_config(&self) -> RuntimeConfigResponse {
+        RuntimeConfigResponse {
+            runtime_id: self.settings.runtime_id.clone(),
+            listen_addr: self.settings.listen_addr.clone(),
+            data_dir: self.settings.data_dir.to_string_lossy().to_string(),
+            max_running_tasks: self.settings.max_running_tasks,
+            max_queued_tasks: self.settings.max_queued_tasks,
+            termination_grace_ms: self.settings.termination_grace.as_millis() as u64,
+            result_retention_secs: self.settings.result_retention.as_secs(),
+            gc_interval_ms: self.settings.gc_interval.as_millis() as u64,
+            dispatch_poll_interval_ms: self.settings.dispatch_poll_interval.as_millis() as u64,
+            cgroup_root: self.settings.cgroup_root.to_string_lossy().to_string(),
+            default_capability_mode: self.settings.default_capability_mode,
+            cgroup_enabled: !self.settings.disable_cgroup,
+        }
+    }
+
+    pub async fn runtime_resources(&self) -> AppResult<RuntimeResourcesResponse> {
+        let active_tasks = self.repo.list_active_reservations()?;
+        let reservations: Vec<TaskResourceReservation> = active_tasks
+            .iter()
+            .filter_map(|task| task.reservation.clone())
+            .collect();
+        let reserved = self.ledger.reserved_capacity(reservations.iter());
+        let available = self.ledger.available_capacity(&reserved);
+        let active_reservations = active_tasks
+            .into_iter()
+            .filter_map(|task| {
+                task.reservation.map(|reservation| ActiveTaskReservation {
+                    task_id: task.task_id,
+                    status: task.status,
+                    reservation,
+                    reserved_at: task.reserved_at,
+                })
+            })
+            .collect();
+
+        Ok(RuntimeResourcesResponse {
+            runtime_id: self.settings.runtime_id.clone(),
+            capacity: self.ledger.capacity().clone(),
+            reserved,
+            available,
+            active_reservations,
+            accepted_waiting_tasks: self.repo.count_accepted_waiting()?,
+        })
+    }
+
     pub fn start_background_loops(&self) {
         let dispatcher_service = self.clone();
         tokio::spawn(async move {
@@ -224,10 +338,26 @@ impl RuntimeService {
     pub async fn recover(&self) -> AppResult<()> {
         for task in self.repo.list_non_terminal()? {
             match task.status {
-                TaskStatus::Accepted => {}
+                TaskStatus::Accepted => {
+                    if task.has_active_reservation() {
+                        self.repo.release_resources(
+                            &task.task_id,
+                            "orphan accepted-task reservation released during recovery",
+                        )?;
+                    }
+                }
                 TaskStatus::Running => {
                     if let Some(shim_pid) = task.shim_pid {
                         if process_exists(shim_pid as i32) {
+                            if !task.has_active_reservation() {
+                                let reservation =
+                                    TaskResourceReservation::from_limits(&task.limits);
+                                self.repo.reserve_resources(
+                                    &task.task_id,
+                                    &reservation,
+                                    "resource reservation reconstructed during recovery",
+                                )?;
+                            }
                             self.repo.mark_recovered(&task.task_id)?;
                         } else {
                             self.repo.mark_recovery_lost(&task.task_id)?;
@@ -258,13 +388,13 @@ impl RuntimeService {
     }
 
     async fn dispatch_once(&self) -> AppResult<()> {
-        let running = self.repo.count_running()? as usize;
-        if running >= self.settings.max_running_tasks {
-            return Ok(());
-        }
-
-        let available = self.settings.max_running_tasks - running;
-        let tasks = self.repo.list_accepted(available)?;
+        let active_reservations = self.repo.list_active_reservations()?;
+        let mut current_reserved = self.ledger.reserved_capacity(
+            active_reservations
+                .iter()
+                .filter_map(|task| task.reservation.as_ref()),
+        );
+        let tasks = self.repo.list_accepted(self.settings.max_queued_tasks)?;
         for task in tasks {
             if task.kill_requested {
                 self.repo.cancel_accepted_task(
@@ -278,6 +408,22 @@ impl RuntimeService {
                 persist_latest_result(&self.repo, &task.task_id)?;
                 continue;
             }
+
+            if task.has_active_reservation() {
+                continue;
+            }
+
+            let reservation = task
+                .reservation
+                .clone()
+                .unwrap_or_else(|| TaskResourceReservation::from_limits(&task.limits));
+            if !self.ledger.can_reserve(&current_reserved, &reservation) {
+                continue;
+            }
+
+            self.repo
+                .reserve_resources(&task.task_id, &reservation, "task resources reserved")?;
+            add_reservation(&mut current_reserved, &reservation);
 
             let exe = std::env::current_exe()
                 .map_err(|err| AppError::LaunchFailed(format!("resolve current exe: {err}")))?;
@@ -319,6 +465,7 @@ impl RuntimeService {
                         result_json: None,
                     };
                     self.repo.complete_task(&task.task_id, &update)?;
+                    subtract_reservation(&mut current_reserved, &reservation);
                     persist_latest_result(&self.repo, &task.task_id)?;
                 }
             }
@@ -515,7 +662,12 @@ async fn run_internal_shim(args: InternalShimArgs) -> AppResult<()> {
         return Ok(());
     }
 
-    match spawn_task_process(&task, &args.cgroup_root) {
+    let execution_plan = task
+        .execution_plan
+        .clone()
+        .unwrap_or_else(|| legacy_execution_plan(&task));
+
+    match spawn_task_process(&task, &execution_plan, &args.cgroup_root) {
         Ok(spawned) => {
             repo.mark_started(
                 &task.task_id,
@@ -530,6 +682,7 @@ async fn run_internal_shim(args: InternalShimArgs) -> AppResult<()> {
                 &task,
                 wait_handle,
                 args.termination_grace_ms,
+                execution_plan.resource_enforcement.wall_time_ms,
                 spawned.pgid,
                 spawned.cgroup_dir.as_deref(),
             )
@@ -586,18 +739,22 @@ struct WaitOutcome {
     completion: CompletionUpdate,
 }
 
-fn spawn_task_process(task: &TaskRecord, _cgroup_root: &Path) -> AppResult<SpawnedProcess> {
+fn spawn_task_process(
+    task: &TaskRecord,
+    execution_plan: &ExecutionPlan,
+    _cgroup_root: &Path,
+) -> AppResult<SpawnedProcess> {
     let stdout_file = open_output_file(&task.stdout_path)?;
     let stderr_file = open_output_file(&task.stderr_path)?;
     let (mut command, script_path) = build_command(task, stdout_file, stderr_file)?;
 
-    let limits = task.limits.clone();
-    let sandbox = task.sandbox.clone();
+    let resource_enforcement = execution_plan.resource_enforcement.clone();
+    let sandbox = execution_plan.effective_sandbox.clone();
     let _rootfs = sandbox.rootfs.clone();
     unsafe {
         command.pre_exec(move || {
             setpgid(Pid::from_raw(0), Pid::from_raw(0)).map_err(nix_to_io)?;
-            apply_rlimits(&limits).map_err(nix_to_io)?;
+            apply_resource_enforcement(&resource_enforcement).map_err(nix_to_io)?;
             #[cfg(target_os = "linux")]
             apply_linux_sandbox(&sandbox, _rootfs.as_deref()).map_err(nix_to_io)?;
             Ok(())
@@ -611,11 +768,16 @@ fn spawn_task_process(task: &TaskRecord, _cgroup_root: &Path) -> AppResult<Spawn
     let pgid = pid as i32;
     drop(child);
 
-    let cgroup_dir = if matches!(task.sandbox.profile, SandboxProfile::LinuxSandbox) {
+    let cgroup_dir = if execution_plan.resource_enforcement.cgroup_enforced {
         #[cfg(target_os = "linux")]
         {
-            let dir = setup_cgroup(_cgroup_root, &task.task_id, pid as i32, task)
-                .map_err(|err| AppError::SandboxSetup(format!("configure cgroup: {err}")))?;
+            let dir = setup_cgroup(
+                _cgroup_root,
+                &task.task_id,
+                pid as i32,
+                &execution_plan.resource_enforcement,
+            )
+            .map_err(|err| AppError::SandboxSetup(format!("configure cgroup: {err}")))?;
             Some(dir)
         }
         #[cfg(not(target_os = "linux"))]
@@ -698,6 +860,7 @@ async fn supervise_wait(
     task: &TaskRecord,
     wait_handle: JoinHandle<AppResult<WaitUsage>>,
     termination_grace_ms: u64,
+    wall_time_ms: u64,
     pgid: i32,
     cgroup_dir: Option<&Path>,
 ) -> AppResult<WaitOutcome> {
@@ -729,7 +892,7 @@ async fn supervise_wait(
             }
             _ = poll.tick() => {
                 let cancel_requested = repo.is_cancel_requested(&task.task_id)?;
-                if timeout_started.is_none() && start.elapsed() >= Duration::from_millis(task.limits.wall_time_ms) {
+                if timeout_started.is_none() && start.elapsed() >= Duration::from_millis(wall_time_ms) {
                     repo.mark_timeout_triggered(&task.task_id)?;
                     timeout_started = Some(Instant::now());
                 }
@@ -901,6 +1064,11 @@ fn build_status_response(task: &TaskRecord) -> AppResult<TaskStatusResponse> {
                 memory_peak_bytes: None,
             })
         }),
+        execution_plan: task
+            .execution_plan
+            .clone()
+            .or_else(|| Some(legacy_execution_plan(task))),
+        reservation: task.reservation.clone(),
         artifacts: TaskArtifacts {
             task_dir: task.task_dir.to_string_lossy().to_string(),
             request_path: task.request_path.to_string_lossy().to_string(),
@@ -914,6 +1082,32 @@ fn build_status_response(task: &TaskRecord) -> AppResult<TaskStatusResponse> {
         },
         metadata: task.metadata.clone(),
     })
+}
+
+fn legacy_execution_plan(task: &TaskRecord) -> ExecutionPlan {
+    ExecutionPlan::legacy(task.sandbox.clone(), task.limits.clone())
+}
+
+fn add_reservation(current: &mut ResourceCapacity, reservation: &TaskResourceReservation) {
+    current.task_slots = current.task_slots.saturating_add(reservation.task_slots);
+    if let Some(value) = reservation.memory_bytes {
+        current.memory_bytes = Some(current.memory_bytes.unwrap_or(0).saturating_add(value));
+    }
+    if let Some(value) = reservation.pids {
+        current.pids = Some(current.pids.unwrap_or(0).saturating_add(value));
+    }
+}
+
+fn subtract_reservation(current: &mut ResourceCapacity, reservation: &TaskResourceReservation) {
+    current.task_slots = current.task_slots.saturating_sub(reservation.task_slots);
+    if let Some(value) = reservation.memory_bytes {
+        current.memory_bytes = current
+            .memory_bytes
+            .map(|reserved| reserved.saturating_sub(value));
+    }
+    if let Some(value) = reservation.pids {
+        current.pids = current.pids.map(|reserved| reserved.saturating_sub(value));
+    }
 }
 
 fn persist_latest_result(repo: &Repository, task_id: &str) -> AppResult<()> {
@@ -1020,6 +1214,29 @@ fn minimal_env(extra: &std::collections::HashMap<String, String>) -> BTreeMap<St
     env
 }
 
+fn apply_resource_enforcement(enforcement: &ResourceEnforcementPlan) -> nix::Result<()> {
+    if enforcement.cpu_time_enforced {
+        if let Some(cpu_time_sec) = enforcement.cpu_time_sec {
+            setrlimit(
+                Resource::RLIMIT_CPU,
+                cpu_time_sec as rlim_t,
+                cpu_time_sec as rlim_t,
+            )?;
+        }
+    }
+    if enforcement.memory_enforced {
+        if let Some(memory_bytes) = enforcement.memory_bytes {
+            setrlimit(
+                Resource::RLIMIT_AS,
+                memory_bytes as rlim_t,
+                memory_bytes as rlim_t,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn apply_rlimits(limits: &crate::types::ResourceLimits) -> nix::Result<()> {
     if let Some(cpu_time_sec) = limits.cpu_time_sec {
         setrlimit(
@@ -1046,7 +1263,7 @@ fn apply_linux_sandbox(
 ) -> nix::Result<()> {
     use nix::sched::{unshare, CloneFlags};
 
-    if matches!(sandbox.profile, SandboxProfile::LinuxSandbox) {
+    if matches!(sandbox.profile, crate::types::SandboxProfile::LinuxSandbox) {
         let namespaces = sandbox.effective_namespaces();
         let mut flags = CloneFlags::empty();
         if namespaces.mount {
@@ -1092,15 +1309,19 @@ fn setup_cgroup(
     cgroup_root: &Path,
     task_id: &str,
     pid: i32,
-    task: &TaskRecord,
+    enforcement: &ResourceEnforcementPlan,
 ) -> AppResult<PathBuf> {
     let dir = cgroup_root.join(task_id);
     fs::create_dir_all(&dir)?;
-    if let Some(memory_bytes) = task.limits.memory_bytes {
-        fs::write(dir.join("memory.max"), memory_bytes.to_string())?;
+    if enforcement.memory_enforced {
+        if let Some(memory_bytes) = enforcement.memory_bytes {
+            fs::write(dir.join("memory.max"), memory_bytes.to_string())?;
+        }
     }
-    if let Some(pids_max) = task.limits.pids_max {
-        fs::write(dir.join("pids.max"), pids_max.to_string())?;
+    if enforcement.pids_enforced {
+        if let Some(pids_max) = enforcement.pids_max {
+            fs::write(dir.join("pids.max"), pids_max.to_string())?;
+        }
     }
     fs::write(dir.join("cgroup.procs"), pid.to_string())?;
     Ok(dir)
@@ -1112,7 +1333,7 @@ fn setup_cgroup(
     _cgroup_root: &Path,
     _task_id: &str,
     _pid: i32,
-    _task: &TaskRecord,
+    _enforcement: &ResourceEnforcementPlan,
 ) -> AppResult<PathBuf> {
     Err(AppError::SandboxSetup(
         "linux-sandbox requires a Linux host".into(),
@@ -1231,6 +1452,31 @@ fn trim_server(server: &str) -> &str {
     server.trim_end_matches('/')
 }
 
+fn default_runtime_id(listen_addr: &str) -> String {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "execgo-runtime".into());
+    format!(
+        "{}-{}",
+        sanitize_runtime_id(&host),
+        sanitize_runtime_id(listen_addr)
+    )
+}
+
+fn sanitize_runtime_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 async fn print_json_response(response: reqwest::Response) -> AppResult<()> {
     let status = response.status();
     let body = response.text().await?;
@@ -1330,6 +1576,11 @@ mod tests {
             kill_requested_at: None,
             timeout_triggered: false,
             result_json: None,
+            execution_plan: None,
+            control_context: None,
+            reservation: None,
+            reserved_at: None,
+            released_at: None,
         };
 
         let response = build_status_response(&task).unwrap();

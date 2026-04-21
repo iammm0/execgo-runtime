@@ -29,7 +29,7 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 
 ## 简介
 
-`execgo-runtime` 在单进程中托管 HTTP 服务，通过 SQLite（WAL）与任务目录持久化状态；调度器将队列中的任务派发到 **internal shim** 子进程执行用户命令或脚本。支持健康检查、就绪探针、Prometheus 指标，以及任务取消与超时控制。Linux 上可选用 `linux_sandbox` 与 cgroup 等能力（详见 [架构说明](docs/architecture.md)）。
+`execgo-runtime` 在单进程中托管 HTTP 服务，通过 SQLite（WAL）与任务目录持久化状态；调度器将队列中的任务派发到 **internal shim** 子进程执行用户命令或脚本。runtime 采用“单一版本、多能力面”的设计：启动时探测宿主环境，暴露 capability manifest，并在任务提交时解析 requested/effective execution plan。支持健康检查、就绪探针、Prometheus 指标、任务取消与超时控制、本机资源账本，以及 Linux 上可选的 `linux_sandbox` 与 cgroup 能力（详见 [架构说明](docs/architecture.md)）。
 
 ## 功能特性
 
@@ -39,7 +39,8 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 | CLI | `serve` / `submit` / `status` / `wait` / `kill` / `run` |
 | 持久化 | SQLite 元数据；`tasks/<id>/` 下 `request.json`、`result.json`、stdout/stderr |
 | 调度与恢复 | shim 子进程执行；重启后可对非终态任务做恢复相关处理 |
-| 资源与沙箱 | 默认进程级；Linux 可选 `linux_sandbox`（命名空间、cgroup 等） |
+| 自适应能力 | 环境探测、capability API、显式降级、requested/effective execution plan |
+| 资源与沙箱 | 默认进程级；Linux 可选 `linux_sandbox`（命名空间、cgroup 等）；本机 ResourceLedger 做 reservation/release |
 
 ## 环境要求
 
@@ -61,6 +62,15 @@ cargo build --release
 ```
 
 ### 容器镜像（可选）
+
+从 GitHub Container Registry 拉取（`main` 分支成功构建后可用）：
+
+```bash
+docker pull ghcr.io/iammm0/execgo-runtime:latest
+docker run --rm -p 8080:8080 -v execgo-data:/data ghcr.io/iammm0/execgo-runtime:latest
+```
+
+或从源码本地构建：
 
 ```bash
 docker build -t execgo-runtime:local .
@@ -120,6 +130,11 @@ chmod +x scripts/quickstart.sh
 |------|------|
 | `RUST_LOG` | 日志级别，如 `info`、`debug`；未设置时由程序默认 `tracing` 配置 |
 | `EXECGO_RUNTIME_URL` | **在 ExecGo 控制面**配置：指向本服务根 URL（无尾斜杠亦可） |
+| `EXECGO_RUNTIME_ID` | 可选：覆盖 runtime 节点 ID |
+| `EXECGO_RUNTIME_DEFAULT_CAPABILITY_MODE` | 可选：默认 capability 策略，`adaptive` 或 `strict` |
+| `EXECGO_RUNTIME_DISABLE_LINUX_SANDBOX` | 可选：禁用 Linux sandbox 探测能力 |
+| `EXECGO_RUNTIME_DISABLE_CGROUP` | 可选：禁用 cgroup 能力 |
+| `EXECGO_RUNTIME_CAPACITY_MEMORY_BYTES` / `EXECGO_RUNTIME_CAPACITY_PIDS` | 可选：覆盖 ResourceLedger 容量探测 |
 
 服务端常用参数见 [CLI 文档](docs/cli.md)（并发上限、队列长度、GC、grace 时间等）。
 
@@ -131,6 +146,10 @@ chmod +x scripts/quickstart.sh
 | `GET` | `/api/v1/tasks/:id` | 任务状态（含输出片段） |
 | `POST` | `/api/v1/tasks/:id/kill` | 取消 |
 | `GET` | `/api/v1/tasks/:id/events` | 事件列表 |
+| `GET` | `/api/v1/runtime/info` | runtime ID、版本、启动时间与平台摘要 |
+| `GET` | `/api/v1/runtime/capabilities` | 宿主环境探测结果、基础语义、增强能力、降级告警 |
+| `GET` | `/api/v1/runtime/config` | 非敏感运行配置摘要 |
+| `GET` | `/api/v1/runtime/resources` | 本机资源 capacity/reserved/available 与活动 reservation |
 | `GET` | `/healthz` | 存活（响应中含 `version`） |
 | `GET` | `/readyz` | 就绪（校验存储） |
 | `GET` | `/metrics` | Prometheus 文本 |

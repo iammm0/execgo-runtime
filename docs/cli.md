@@ -19,6 +19,12 @@
 | `--gc-interval-ms` | `1000` | 垃圾回收轮询间隔。 |
 | `--dispatch-poll-interval-ms` | `250` | 调度器在无通知时的轮询间隔（与内部 `Notify` 配合）。 |
 | `--cgroup-root` | `/sys/fs/cgroup/execgo-runtime` | Linux cgroup v2 挂载点下用于每任务子目录（`linux_sandbox` 时）。 |
+| `--runtime-id` | 自动生成 | 覆盖 runtime 节点 ID；也可用 `EXECGO_RUNTIME_ID`。 |
+| `--default-capability-mode` | `adaptive` | 默认 capability 策略：`adaptive` 会显式降级，`strict` 会拒绝不满足能力的任务。 |
+| `--disable-linux-sandbox` | `false` | 禁用 Linux sandbox capability，即使宿主环境看起来支持。 |
+| `--disable-cgroup` | `false` | 禁用 cgroup capability 与对应增强语义。 |
+| `--capacity-memory-bytes` | 自动探测 | 覆盖 ResourceLedger 的本机内存容量。 |
+| `--capacity-pids` | 自动探测 | 覆盖 ResourceLedger 的本机 pids 容量。 |
 
 日志：默认 `tracing` JSON，可通过环境变量 `RUST_LOG` 调整（如 `RUST_LOG=info`）。
 

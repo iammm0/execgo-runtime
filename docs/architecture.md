@@ -10,6 +10,9 @@
 |------|------|------|
 | `server` | `src/server.rs` | Axum 路由：`/api/v1/*`、`/healthz`、`/readyz`、`/metrics` |
 | `runtime` | `src/runtime.rs` | 运行时核心：提交、查询、kill、dispatcher、GC、shim 入口、进程执行 |
+| `capabilities` | `src/capabilities.rs` | 启动时探测宿主环境，生成 capability manifest |
+| `policy` | `src/policy.rs` | 将任务请求解析为 requested/effective execution plan，处理 strict/adaptive 策略 |
+| `ledger` | `src/ledger.rs` | 本机 ResourceLedger 的 capacity/reservation/available 计算 |
 | `repo` | `src/repo.rs` | SQLite 访问：任务表、事件表、指标聚合 |
 | `types` | `src/types.rs` | 请求/响应与策略类型（执行规格、沙箱、限额） |
 | `metrics` | `src/metrics.rs` | 将仓库快照渲染为 Prometheus 文本 |
@@ -28,12 +31,14 @@
 
 ## 调度与 shim
 
-1. **Dispatcher** 循环从队列中取 `accepted` 任务，在不超过 `max_running_tasks` 时派发。
-2. 派发时以**当前可执行文件**再执行 `internal-shim` 子命令，传入 `--database`、`--data-dir`、`--task-id` 等。
-3. **Shim** 读取任务记录，构建 `Command`/`Script` 执行，在 `pre_exec` 中设置进程组、`rlimit`，在 Linux 上可选应用 Linux 沙箱与 cgroup。
-4. 主进程通过 `wait4` 等待子进程结束，并结合取消、超时、OOM 等条件写入 `CompletionUpdate`。
+1. **EnvironmentProbe** 在 `serve` 启动时生成 capability manifest，并缓存到 `RuntimeService`。
+2. 提交任务时，**PolicyResolver** 基于请求、capabilities 与可选 `control_context` 生成 `execution_plan`；`adaptive` 模式会显式降级，`strict` 模式会拒绝不满足能力的任务。
+3. **Dispatcher** 循环从队列中取 `accepted` 任务，先通过本机 **ResourceLedger** 做 `task_slots` / `memory_bytes` / `pids` reservation，再派发 shim。
+4. 派发时以**当前可执行文件**再执行 `internal-shim` 子命令，传入 `--database`、`--data-dir`、`--task-id` 等。
+5. **Shim** 读取任务记录与持久化的 `execution_plan`，构建 `Command`/`Script` 执行，在 `pre_exec` 中设置进程组、按 effective plan 应用 `rlimit`，在 Linux 上可选应用 Linux 沙箱与 cgroup。
+6. shim 通过 `wait4` 等待子进程结束，并结合取消、超时、OOM 等条件写入 `CompletionUpdate`；终态写入时会释放活动 reservation。
 
-运行时重启后，`recover` 会扫描非终态任务：对 `running` 若 shim 仍在则标记恢复事件；否则标记为失败并落盘结果。
+运行时重启后，`recover` 会扫描非终态任务：`accepted` 不应持有活动 reservation，若发现会释放；`running` 若 shim 仍在则保留或重建 reservation 并标记恢复事件，否则标记为失败、释放 reservation 并落盘结果。
 
 ## 持久化布局
 
@@ -46,10 +51,12 @@
   - `stdout.log` / `stderr.log`：输出日志。
   - `workspace/` 或 `workspace/<subdir>/`：工作目录（由 `sandbox.workspace_subdir` 决定）。
 
+数据库中任务行还持久化 `execution_plan_json`、`control_context_json`、`reservation_json`、`reserved_at_ms`、`released_at_ms`，用于能力审计、恢复对账与资源释放。
+
 ## 沙箱与平台差异
 
 - **`sandbox.profile = process`**（默认）：在普通进程环境中执行，依赖 `rlimit` 等限制。
-- **`sandbox.profile = linux_sandbox`**：仅在 **Linux** 上合法；在非 Linux 主机上提交请求会在校验阶段拒绝。
+- **`sandbox.profile = linux_sandbox`**：作为 requested capability 提交；runtime 会按 capability mode 决定 strict 拒绝或 adaptive fallback，并在 `execution_plan` 中暴露 effective sandbox。
 
 详见 [api.md](api.md) 中的沙箱字段说明。
 

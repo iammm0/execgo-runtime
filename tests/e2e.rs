@@ -26,6 +26,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_args(&[]).await
+    }
+
+    async fn start_with_args(extra_args: &[&str]) -> Self {
         let temp = TempDir::new().expect("tempdir");
         let port = find_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -41,9 +45,11 @@ impl TestServer {
             .arg("--dispatch-poll-interval-ms")
             .arg("100")
             .arg("--gc-interval-ms")
-            .arg("10000")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .arg("10000");
+        for arg in extra_args {
+            child.arg(arg);
+        }
+        child.stdout(Stdio::null()).stderr(Stdio::null());
 
         let child = child.spawn().expect("spawn server");
         let server = Self {
@@ -88,6 +94,28 @@ async fn submit_task(server: &TestServer, payload: Value) -> Value {
         .json::<Value>()
         .await
         .expect("submit json")
+}
+
+async fn submit_task_raw(server: &TestServer, payload: Value) -> reqwest::Response {
+    Client::new()
+        .post(format!("{}/api/v1/tasks", server.base_url))
+        .json(&payload)
+        .send()
+        .await
+        .expect("submit request")
+}
+
+async fn get_json(server: &TestServer, path: &str) -> Value {
+    Client::new()
+        .get(format!("{}{}", server.base_url, path))
+        .send()
+        .await
+        .expect("get request")
+        .error_for_status()
+        .expect("get success")
+        .json::<Value>()
+        .await
+        .expect("get json")
 }
 
 async fn get_status(server: &TestServer, task_id: &str) -> Value {
@@ -239,4 +267,128 @@ async fn cli_run_and_kill_flow_work() {
         .as_str()
         .unwrap_or_default()
         .contains("cli-run"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_endpoints_and_resource_snapshot_work() {
+    let server = TestServer::start_with_args(&[
+        "--runtime-id",
+        "runtime-test",
+        "--capacity-memory-bytes",
+        "134217728",
+        "--capacity-pids",
+        "64",
+        "--disable-linux-sandbox",
+        "--disable-cgroup",
+    ])
+    .await;
+
+    let info = get_json(&server, "/api/v1/runtime/info").await;
+    assert_eq!(info["runtime_id"], "runtime-test");
+    assert_eq!(info["snapshot_version"], "v1");
+
+    let capabilities = get_json(&server, "/api/v1/runtime/capabilities").await;
+    assert_eq!(capabilities["runtime_id"], "runtime-test");
+    assert_eq!(
+        capabilities["resources"]["capacity"]["memory_bytes"],
+        134_217_728u64
+    );
+    assert_eq!(capabilities["overrides"]["linux_sandbox"], "disabled");
+
+    let config = get_json(&server, "/api/v1/runtime/config").await;
+    assert_eq!(config["runtime_id"], "runtime-test");
+    assert_eq!(config["default_capability_mode"], "adaptive");
+    assert_eq!(config["cgroup_enabled"], false);
+
+    let submitted = submit_task(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "sleep 2"]
+            },
+            "limits": {
+                "wall_time_ms": 5000
+            }
+        }),
+    )
+    .await;
+    let task_id = submitted["task_id"].as_str().expect("task id");
+
+    let mut resources = get_json(&server, "/api/v1/runtime/resources").await;
+    for _ in 0..40 {
+        let active = resources["active_reservations"]
+            .as_array()
+            .expect("active reservations array");
+        if active
+            .iter()
+            .any(|item| item["task_id"].as_str() == Some(task_id))
+        {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+        resources = get_json(&server, "/api/v1/runtime/resources").await;
+    }
+
+    let active = resources["active_reservations"]
+        .as_array()
+        .expect("active reservations array");
+    assert!(active
+        .iter()
+        .any(|item| item["task_id"].as_str() == Some(task_id)));
+    assert_eq!(resources["reserved"]["task_slots"], 1);
+    assert_eq!(resources["accepted_waiting_tasks"], 0);
+
+    let terminal = wait_terminal(&server, task_id).await;
+    assert_eq!(terminal["status"], "success");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adaptive_plan_is_visible_and_strict_mode_rejects() {
+    let server = TestServer::start_with_args(&["--disable-linux-sandbox"]).await;
+
+    let adaptive = submit_task(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "echo adaptive-plan"]
+            },
+            "sandbox": {
+                "profile": "linux_sandbox"
+            }
+        }),
+    )
+    .await;
+    let task_id = adaptive["task_id"].as_str().expect("task id");
+    let terminal = wait_terminal(&server, task_id).await;
+    assert_eq!(terminal["status"], "success");
+    assert_eq!(terminal["execution_plan"]["degraded"], true);
+    assert_eq!(
+        terminal["execution_plan"]["effective_sandbox"]["profile"],
+        "process"
+    );
+
+    let strict = submit_task_raw(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "echo strict-plan"]
+            },
+            "sandbox": {
+                "profile": "linux_sandbox"
+            },
+            "policy": {
+                "capability_mode": "strict"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(strict.status(), reqwest::StatusCode::BAD_REQUEST);
+    let strict_body = strict.json::<Value>().await.expect("strict error json");
+    assert_eq!(strict_body["error"]["code"], "unsupported_capability");
 }

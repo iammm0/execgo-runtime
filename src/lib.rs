@@ -1,6 +1,9 @@
+pub mod capabilities;
 pub mod cli;
 pub mod error;
+pub mod ledger;
 pub mod metrics;
+pub mod policy;
 pub mod repo;
 pub mod runtime;
 pub mod server;

@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, AppResult},
     types::{
-        ErrorCode, EventRecord, EventType, ExecutionSpec, ResourceLimits, ResourceUsage,
-        RuntimeErrorInfo, SandboxPolicy, SubmitTaskRequest, TaskStatus,
+        ControlContext, ErrorCode, EventRecord, EventType, ExecutionPlan, ExecutionSpec,
+        ResourceLimits, ResourceUsage, RuntimeErrorInfo, SandboxPolicy, SubmitTaskRequest,
+        TaskResourceReservation, TaskStatus,
     },
 };
 
@@ -54,6 +55,11 @@ pub struct TaskRecord {
     pub kill_requested_at: Option<DateTime<Utc>>,
     pub timeout_triggered: bool,
     pub result_json: Option<Value>,
+    pub execution_plan: Option<ExecutionPlan>,
+    pub control_context: Option<ControlContext>,
+    pub reservation: Option<TaskResourceReservation>,
+    pub reserved_at: Option<DateTime<Utc>>,
+    pub released_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +73,8 @@ pub struct NewTaskRecord {
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
     pub script_path: Option<PathBuf>,
+    pub execution_plan: ExecutionPlan,
+    pub control_context: Option<ControlContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +94,12 @@ pub struct MetricsSnapshot {
     pub by_status: std::collections::BTreeMap<String, u64>,
     pub by_error_code: std::collections::BTreeMap<String, u64>,
     pub finished_durations_ms: Vec<u64>,
+}
+
+impl TaskRecord {
+    pub fn has_active_reservation(&self) -> bool {
+        self.reservation.is_some() && self.released_at.is_none()
+    }
 }
 
 impl Repository {
@@ -142,7 +156,12 @@ impl Repository {
                 kill_requested INTEGER NOT NULL DEFAULT 0,
                 kill_requested_at_ms INTEGER NULL,
                 timeout_triggered INTEGER NOT NULL DEFAULT 0,
-                result_json TEXT NULL
+                result_json TEXT NULL,
+                execution_plan_json TEXT NULL,
+                control_context_json TEXT NULL,
+                reservation_json TEXT NULL,
+                reserved_at_ms INTEGER NULL,
+                released_at_ms INTEGER NULL
             );
 
             CREATE TABLE IF NOT EXISTS task_events (
@@ -160,6 +179,11 @@ impl Repository {
             CREATE INDEX IF NOT EXISTS idx_task_events_task_id_seq ON task_events(task_id, seq);
             "#,
         )?;
+        ensure_task_column(&conn, "execution_plan_json", "TEXT NULL")?;
+        ensure_task_column(&conn, "control_context_json", "TEXT NULL")?;
+        ensure_task_column(&conn, "reservation_json", "TEXT NULL")?;
+        ensure_task_column(&conn, "reserved_at_ms", "INTEGER NULL")?;
+        ensure_task_column(&conn, "released_at_ms", "INTEGER NULL")?;
         Ok(())
     }
 
@@ -174,9 +198,9 @@ impl Repository {
                 execution_json, limits_json, sandbox_json, metadata_json,
                 created_at_ms, updated_at_ms,
                 task_dir, workspace_dir, request_path, result_path, stdout_path, stderr_path, script_path,
-                stdout_max_bytes, stderr_max_bytes
+                stdout_max_bytes, stderr_max_bytes, execution_plan_json, control_context_json
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             "#,
             params![
@@ -203,6 +227,8 @@ impl Repository {
                     .map_err(|_| AppError::InvalidInput("stdout_max_bytes is too large".into()))?,
                 i64::try_from(new_task.request.limits.stderr_max_bytes)
                     .map_err(|_| AppError::InvalidInput("stderr_max_bytes is too large".into()))?,
+                to_json(&new_task.execution_plan)?,
+                new_task.control_context.as_ref().map(to_json).transpose()?,
             ],
         )
         .map_err(|err| {
@@ -227,6 +253,25 @@ impl Repository {
             Some("task accepted"),
             None,
         )?;
+        insert_event_tx(
+            &tx,
+            &new_task.task_id,
+            EventType::Planned,
+            Some("execution plan resolved"),
+            Some(&serde_json::to_value(&new_task.execution_plan)?),
+        )?;
+        if new_task.execution_plan.degraded {
+            insert_event_tx(
+                &tx,
+                &new_task.task_id,
+                EventType::Degraded,
+                Some("execution plan degraded"),
+                Some(&serde_json::json!({
+                    "fallback_reasons": &new_task.execution_plan.fallback_reasons,
+                    "effective_sandbox": &new_task.execution_plan.effective_sandbox,
+                })),
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -309,6 +354,29 @@ impl Repository {
         Ok(items)
     }
 
+    pub fn list_active_reservations(&self) -> AppResult<Vec<TaskRecord>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM tasks WHERE reservation_json IS NOT NULL AND released_at_ms IS NULL ORDER BY reserved_at_ms ASC, created_at_ms ASC",
+        )?;
+        let iter = stmt.query_map([], row_to_task_record)?;
+        let mut items = Vec::new();
+        for item in iter {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn count_accepted_waiting(&self) -> AppResult<u64> {
+        let conn = self.connect()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'accepted' AND (reservation_json IS NULL OR released_at_ms IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
     pub fn mark_dispatched(&self, task_id: &str, shim_pid: u32) -> AppResult<()> {
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
@@ -340,6 +408,64 @@ impl Repository {
             ],
         )?;
         insert_event_tx(&tx, task_id, EventType::Started, Some("task started"), None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reserve_resources(
+        &self,
+        task_id: &str,
+        reservation: &TaskResourceReservation,
+        message: &str,
+    ) -> AppResult<()> {
+        let now = Utc::now();
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE tasks SET reservation_json = ?2, reserved_at_ms = ?3, released_at_ms = NULL, updated_at_ms = ?3 WHERE task_id = ?1",
+            params![
+                task_id,
+                to_json(reservation)?,
+                now.timestamp_millis(),
+            ],
+        )?;
+        insert_event_tx(
+            &tx,
+            task_id,
+            EventType::ResourceReserved,
+            Some(message),
+            Some(&serde_json::to_value(reservation)?),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn release_resources(&self, task_id: &str, message: &str) -> AppResult<()> {
+        let now = Utc::now();
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        let reservation_json: Option<String> = tx
+            .query_row(
+                "SELECT reservation_json FROM tasks WHERE task_id = ?1 AND reservation_json IS NOT NULL AND released_at_ms IS NULL",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = reservation_json {
+            let reservation: TaskResourceReservation =
+                serde_json::from_str(&raw).map_err(AppError::Json)?;
+            tx.execute(
+                "UPDATE tasks SET released_at_ms = ?2, updated_at_ms = ?2 WHERE task_id = ?1",
+                params![task_id, now.timestamp_millis()],
+            )?;
+            insert_event_tx(
+                &tx,
+                task_id,
+                EventType::ResourceReleased,
+                Some(message),
+                Some(&serde_json::to_value(reservation)?),
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -386,12 +512,23 @@ impl Repository {
         let now = Utc::now();
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
+        let active_reservation_json: Option<String> = tx
+            .query_row(
+                "SELECT reservation_json FROM tasks WHERE task_id = ?1 AND reservation_json IS NOT NULL AND released_at_ms IS NULL",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         tx.execute(
             r#"
             UPDATE tasks
             SET status = 'cancelled',
                 updated_at_ms = ?2,
                 finished_at_ms = ?2,
+                released_at_ms = CASE
+                    WHEN released_at_ms IS NULL AND reservation_json IS NOT NULL THEN ?2
+                    ELSE released_at_ms
+                END,
                 error_code = ?3,
                 error_json = ?4,
                 duration_ms = 0,
@@ -404,14 +541,25 @@ impl Repository {
                 encode_error_code(error.code),
                 to_json(&error)?,
                 to_json(&serde_json::json!({
-                    "task_id": task_id,
-                    "handle_id": task_id,
-                    "status": TaskStatus::Cancelled,
-                    "finished_at": now,
+                        "task_id": task_id,
+                        "handle_id": task_id,
+                        "status": TaskStatus::Cancelled,
+                        "finished_at": now,
                     "error": error,
                 }))?,
             ],
         )?;
+        if let Some(raw) = active_reservation_json {
+            let reservation: TaskResourceReservation =
+                serde_json::from_str(&raw).map_err(AppError::Json)?;
+            insert_event_tx(
+                &tx,
+                task_id,
+                EventType::ResourceReleased,
+                Some("task resources released"),
+                Some(&serde_json::to_value(reservation)?),
+            )?;
+        }
         insert_event_tx(
             &tx,
             task_id,
@@ -426,12 +574,23 @@ impl Repository {
     pub fn complete_task(&self, task_id: &str, update: &CompletionUpdate) -> AppResult<()> {
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
+        let active_reservation_json: Option<String> = tx
+            .query_row(
+                "SELECT reservation_json FROM tasks WHERE task_id = ?1 AND reservation_json IS NOT NULL AND released_at_ms IS NULL",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         tx.execute(
             r#"
             UPDATE tasks
             SET status = ?2,
                 updated_at_ms = ?3,
                 finished_at_ms = ?3,
+                released_at_ms = CASE
+                    WHEN released_at_ms IS NULL AND reservation_json IS NOT NULL THEN ?3
+                    ELSE released_at_ms
+                END,
                 duration_ms = ?4,
                 exit_code = ?5,
                 exit_signal = ?6,
@@ -460,6 +619,18 @@ impl Repository {
                 update.result_json.as_ref().map(to_json).transpose()?,
             ],
         )?;
+
+        if let Some(raw) = active_reservation_json {
+            let reservation: TaskResourceReservation =
+                serde_json::from_str(&raw).map_err(AppError::Json)?;
+            insert_event_tx(
+                &tx,
+                task_id,
+                EventType::ResourceReleased,
+                Some("task resources released"),
+                Some(&serde_json::to_value(reservation)?),
+            )?;
+        }
 
         let event_type = match update.status {
             TaskStatus::Success => EventType::Finished,
@@ -594,6 +765,21 @@ pub fn generate_task_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+fn ensure_task_column(conn: &Connection, name: &str, definition: &str) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == name {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
 fn row_to_task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
         task_id: row.get("task_id")?,
@@ -653,6 +839,24 @@ fn row_to_task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
             .get::<_, Option<String>>("result_json")?
             .map(from_json)
             .transpose()?,
+        execution_plan: row
+            .get::<_, Option<String>>("execution_plan_json")?
+            .map(from_json)
+            .transpose()?,
+        control_context: row
+            .get::<_, Option<String>>("control_context_json")?
+            .map(from_json)
+            .transpose()?,
+        reservation: row
+            .get::<_, Option<String>>("reservation_json")?
+            .map(from_json)
+            .transpose()?,
+        reserved_at: row
+            .get::<_, Option<i64>>("reserved_at_ms")?
+            .map(ts_millis_to_utc),
+        released_at: row
+            .get::<_, Option<i64>>("released_at_ms")?
+            .map(ts_millis_to_utc),
     })
 }
 
@@ -726,6 +930,8 @@ fn encode_error_code(code: ErrorCode) -> &'static str {
         ErrorCode::ResourceLimitExceeded => "resource_limit_exceeded",
         ErrorCode::SandboxSetupFailed => "sandbox_setup_failed",
         ErrorCode::ExitNonZero => "exit_nonzero",
+        ErrorCode::UnsupportedCapability => "unsupported_capability",
+        ErrorCode::InsufficientResources => "insufficient_resources",
         ErrorCode::Internal => "internal",
     }
 }
@@ -741,6 +947,8 @@ fn decode_error_code(value: &str) -> rusqlite::Result<ErrorCode> {
         "resource_limit_exceeded" => Ok(ErrorCode::ResourceLimitExceeded),
         "sandbox_setup_failed" => Ok(ErrorCode::SandboxSetupFailed),
         "exit_nonzero" => Ok(ErrorCode::ExitNonZero),
+        "unsupported_capability" => Ok(ErrorCode::UnsupportedCapability),
+        "insufficient_resources" => Ok(ErrorCode::InsufficientResources),
         "internal" => Ok(ErrorCode::Internal),
         other => Err(rusqlite::Error::InvalidColumnType(
             0,
@@ -754,6 +962,10 @@ fn encode_event_type(event_type: EventType) -> &'static str {
     match event_type {
         EventType::Submitted => "submitted",
         EventType::Accepted => "accepted",
+        EventType::Planned => "planned",
+        EventType::Degraded => "degraded",
+        EventType::ResourceReserved => "resource_reserved",
+        EventType::ResourceReleased => "resource_released",
         EventType::Started => "started",
         EventType::KillRequested => "kill_requested",
         EventType::TimeoutTriggered => "timeout_triggered",
@@ -768,6 +980,10 @@ fn decode_event_type(value: &str) -> rusqlite::Result<EventType> {
     match value {
         "submitted" => Ok(EventType::Submitted),
         "accepted" => Ok(EventType::Accepted),
+        "planned" => Ok(EventType::Planned),
+        "degraded" => Ok(EventType::Degraded),
+        "resource_reserved" => Ok(EventType::ResourceReserved),
+        "resource_released" => Ok(EventType::ResourceReleased),
         "started" => Ok(EventType::Started),
         "kill_requested" => Ok(EventType::KillRequested),
         "timeout_triggered" => Ok(EventType::TimeoutTriggered),

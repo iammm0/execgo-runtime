@@ -4,6 +4,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,6 +12,7 @@ use crate::error::{AppError, AppResult};
 
 const DEFAULT_OUTPUT_INLINE_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_WALL_TIME_MS: u64 = 5 * 60 * 1000;
+const CAPABILITY_SNAPSHOT_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +42,8 @@ pub enum ErrorCode {
     ResourceLimitExceeded,
     SandboxSetupFailed,
     ExitNonZero,
+    UnsupportedCapability,
+    InsufficientResources,
     Internal,
 }
 
@@ -56,6 +60,10 @@ pub struct RuntimeErrorInfo {
 pub enum EventType {
     Submitted,
     Accepted,
+    Planned,
+    Degraded,
+    ResourceReserved,
+    ResourceReleased,
     Started,
     KillRequested,
     TimeoutTriggered,
@@ -139,6 +147,70 @@ impl ExecutionSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityMode {
+    #[default]
+    Adaptive,
+    Strict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TaskPolicy {
+    #[serde(default)]
+    pub capability_mode: CapabilityMode,
+}
+
+impl TaskPolicy {
+    pub fn validate(&self) -> AppResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ControlContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_profile: Option<String>,
+    #[serde(default)]
+    pub requires_strict_sandbox: bool,
+    #[serde(default)]
+    pub requires_resource_reservation: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+impl ControlContext {
+    pub fn validate(&self) -> AppResult<()> {
+        if self
+            .labels
+            .keys()
+            .any(|key| key.trim().is_empty() || key.contains('='))
+        {
+            return Err(AppError::InvalidInput(
+                "control_context.labels keys must be non-empty and cannot contain '='".into(),
+            ));
+        }
+
+        for value in [
+            self.control_plane_mode.as_deref(),
+            self.tenant.as_deref(),
+            self.expected_runtime_profile.as_deref(),
+        ] {
+            if value.is_some_and(|item| item.trim().is_empty()) {
+                return Err(AppError::InvalidInput(
+                    "control_context values cannot be empty strings".into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProfile {
@@ -203,12 +275,6 @@ impl SandboxPolicy {
     pub fn validate(&self) -> AppResult<()> {
         if let Some(subdir) = &self.workspace_subdir {
             validate_relative_workspace_subdir(subdir)?;
-        }
-        #[cfg(not(target_os = "linux"))]
-        if matches!(self.profile, SandboxProfile::LinuxSandbox) {
-            return Err(AppError::InvalidInput(
-                "sandbox.profile=linux_sandbox requires a Linux host".into(),
-            ));
         }
         if self.chroot
             && self
@@ -280,6 +346,86 @@ impl ResourceLimits {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceEnforcementPlan {
+    pub wall_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_sec: Option<u64>,
+    #[serde(default)]
+    pub cpu_time_enforced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub memory_enforced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_max: Option<u64>,
+    #[serde(default)]
+    pub pids_enforced: bool,
+    #[serde(default)]
+    pub cgroup_enforced: bool,
+    #[serde(default)]
+    pub oom_detection: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionPlan {
+    #[serde(default)]
+    pub capability_mode: CapabilityMode,
+    pub requested_sandbox: SandboxPolicy,
+    pub effective_sandbox: SandboxPolicy,
+    pub resource_enforcement: ResourceEnforcementPlan,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_warnings: Vec<String>,
+}
+
+impl ExecutionPlan {
+    pub fn legacy(sandbox: SandboxPolicy, limits: ResourceLimits) -> Self {
+        let cgroup_enforced = matches!(sandbox.profile, SandboxProfile::LinuxSandbox);
+        Self {
+            capability_mode: CapabilityMode::Adaptive,
+            requested_sandbox: sandbox.clone(),
+            effective_sandbox: sandbox,
+            resource_enforcement: ResourceEnforcementPlan {
+                wall_time_ms: limits.wall_time_ms,
+                cpu_time_sec: limits.cpu_time_sec,
+                cpu_time_enforced: limits.cpu_time_sec.is_some(),
+                memory_bytes: limits.memory_bytes,
+                memory_enforced: limits.memory_bytes.is_some(),
+                pids_max: limits.pids_max,
+                pids_enforced: limits.pids_max.is_some() && cgroup_enforced,
+                cgroup_enforced,
+                oom_detection: limits.memory_bytes.is_some() && cgroup_enforced,
+            },
+            degraded: false,
+            fallback_reasons: Vec::new(),
+            capability_warnings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskResourceReservation {
+    pub task_slots: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids: Option<u64>,
+}
+
+impl TaskResourceReservation {
+    pub fn from_limits(limits: &ResourceLimits) -> Self {
+        Self {
+            task_slots: 1,
+            memory_bytes: limits.memory_bytes,
+            pids: limits.pids_max,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubmitTaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,6 +435,10 @@ pub struct SubmitTaskRequest {
     pub limits: ResourceLimits,
     #[serde(default)]
     pub sandbox: SandboxPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<TaskPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_context: Option<ControlContext>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
 }
@@ -301,6 +451,12 @@ impl SubmitTaskRequest {
         self.execution.validate()?;
         self.limits.validate()?;
         self.sandbox.validate()?;
+        if let Some(policy) = &self.policy {
+            policy.validate()?;
+        }
+        if let Some(control_context) = &self.control_context {
+            control_context.validate()?;
+        }
         Ok(())
     }
 }
@@ -367,6 +523,10 @@ pub struct TaskStatusResponse {
     pub error: Option<RuntimeErrorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<ResourceUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_plan: Option<ExecutionPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<TaskResourceReservation>,
     pub artifacts: TaskArtifacts,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
@@ -388,6 +548,139 @@ pub struct EventRecord {
 pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePlatform {
+    pub os: String,
+    pub arch: String,
+    pub containerized: bool,
+    pub kubernetes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionCapabilities {
+    pub command: bool,
+    pub script: bool,
+    pub process_group: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NamespaceCapabilities {
+    pub mount: bool,
+    pub pid: bool,
+    pub uts: bool,
+    pub ipc: bool,
+    pub net: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxCapabilities {
+    pub process: bool,
+    pub linux_sandbox: bool,
+    pub chroot: bool,
+    pub namespaces: NamespaceCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageCapabilities {
+    pub data_dir_writable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceCapacity {
+    pub task_slots: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceCapabilities {
+    pub rlimit_cpu: bool,
+    pub rlimit_memory: bool,
+    pub cgroup_v2: bool,
+    pub cgroup_writable: bool,
+    pub memory_limit: bool,
+    pub pids_limit: bool,
+    pub oom_detection: bool,
+    pub cpu_quota: bool,
+    pub ledger: bool,
+    pub capacity: ResourceCapacity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeCapabilities {
+    pub runtime_id: String,
+    pub snapshot_version: String,
+    pub collected_at: DateTime<Utc>,
+    pub platform: RuntimePlatform,
+    pub execution: ExecutionCapabilities,
+    pub sandbox: SandboxCapabilities,
+    pub storage: StorageCapabilities,
+    pub resources: ResourceCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stable_semantics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enhanced_semantics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, String>,
+}
+
+impl RuntimeCapabilities {
+    pub fn snapshot_version() -> &'static str {
+        CAPABILITY_SNAPSHOT_VERSION
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeInfoResponse {
+    pub runtime_id: String,
+    pub version: String,
+    pub started_at: DateTime<Utc>,
+    pub snapshot_version: String,
+    pub platform: RuntimePlatform,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeConfigResponse {
+    pub runtime_id: String,
+    pub listen_addr: String,
+    pub data_dir: String,
+    pub max_running_tasks: usize,
+    pub max_queued_tasks: usize,
+    pub termination_grace_ms: u64,
+    pub result_retention_secs: u64,
+    pub gc_interval_ms: u64,
+    pub dispatch_poll_interval_ms: u64,
+    pub cgroup_root: String,
+    pub default_capability_mode: CapabilityMode,
+    pub cgroup_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActiveTaskReservation {
+    pub task_id: String,
+    pub status: TaskStatus,
+    pub reservation: TaskResourceReservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeResourcesResponse {
+    pub runtime_id: String,
+    pub capacity: ResourceCapacity,
+    pub reserved: ResourceCapacity,
+    pub available: ResourceCapacity,
+    #[serde(default)]
+    pub active_reservations: Vec<ActiveTaskReservation>,
+    pub accepted_waiting_tasks: u64,
 }
 
 pub fn validate_task_id(task_id: &str) -> AppResult<()> {
@@ -477,16 +770,25 @@ mod tests {
         assert!(sandbox.validate().is_err());
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn rejects_linux_sandbox_on_non_linux_host() {
+    fn default_policy_is_adaptive() {
+        assert_eq!(
+            TaskPolicy::default().capability_mode,
+            CapabilityMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn legacy_execution_plan_keeps_requested_sandbox() {
         let sandbox = SandboxPolicy {
             profile: SandboxProfile::LinuxSandbox,
             workspace_subdir: None,
             rootfs: None,
             chroot: false,
-            namespaces: None,
+            namespaces: Some(NamespaceConfig::default()),
         };
-        assert!(sandbox.validate().is_err());
+        let plan = ExecutionPlan::legacy(sandbox.clone(), ResourceLimits::default());
+        assert_eq!(plan.requested_sandbox, sandbox);
+        assert_eq!(plan.effective_sandbox.profile, SandboxProfile::LinuxSandbox);
     }
 }

@@ -2,6 +2,8 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
+use crate::types::CapabilityMode;
+
 #[derive(Debug, Parser)]
 #[command(name = "execgo-runtime", version, about = "ExecGo runtime data plane")]
 pub struct Cli {
@@ -41,6 +43,26 @@ pub struct ServeArgs {
     pub dispatch_poll_interval_ms: u64,
     #[arg(long, default_value = "/sys/fs/cgroup/execgo-runtime")]
     pub cgroup_root: PathBuf,
+    #[arg(long, env = "EXECGO_RUNTIME_ID")]
+    pub runtime_id: Option<String>,
+    #[arg(
+        long,
+        env = "EXECGO_RUNTIME_DEFAULT_CAPABILITY_MODE",
+        default_value = "adaptive"
+    )]
+    pub default_capability_mode: CapabilityMode,
+    #[arg(
+        long,
+        env = "EXECGO_RUNTIME_DISABLE_LINUX_SANDBOX",
+        default_value_t = false
+    )]
+    pub disable_linux_sandbox: bool,
+    #[arg(long, env = "EXECGO_RUNTIME_DISABLE_CGROUP", default_value_t = false)]
+    pub disable_cgroup: bool,
+    #[arg(long, env = "EXECGO_RUNTIME_CAPACITY_MEMORY_BYTES")]
+    pub capacity_memory_bytes: Option<u64>,
+    #[arg(long, env = "EXECGO_RUNTIME_CAPACITY_PIDS")]
+    pub capacity_pids: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]

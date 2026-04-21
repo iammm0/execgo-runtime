@@ -25,6 +25,10 @@ pub enum AppError {
     LaunchFailed(String),
     #[error("sandbox setup failed: {0}")]
     SandboxSetup(String),
+    #[error("unsupported capability: {0}")]
+    UnsupportedCapability(String),
+    #[error("insufficient resources: {0}")]
+    InsufficientResources(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("sqlite error: {0}")]
@@ -46,6 +50,8 @@ impl AppError {
             AppError::Conflict(_) => ErrorCode::Internal,
             AppError::LaunchFailed(_) => ErrorCode::LaunchFailed,
             AppError::SandboxSetup(_) => ErrorCode::SandboxSetupFailed,
+            AppError::UnsupportedCapability(_) => ErrorCode::UnsupportedCapability,
+            AppError::InsufficientResources(_) => ErrorCode::InsufficientResources,
             AppError::Io(_) | AppError::Sqlite(_) | AppError::Json(_) | AppError::Http(_) => {
                 ErrorCode::Internal
             }
@@ -59,7 +65,10 @@ impl AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::QueueFull => StatusCode::TOO_MANY_REQUESTS,
             AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::LaunchFailed(_) | AppError::SandboxSetup(_) => StatusCode::BAD_REQUEST,
+            AppError::LaunchFailed(_)
+            | AppError::SandboxSetup(_)
+            | AppError::UnsupportedCapability(_)
+            | AppError::InsufficientResources(_) => StatusCode::BAD_REQUEST,
             AppError::Io(_)
             | AppError::Sqlite(_)
             | AppError::Json(_)
