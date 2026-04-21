@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
-[![Crates.io](https://img.shields.io/badge/crates.io-未发布-lightgrey.svg)](https://crates.io/)
+[![Crates.io](https://img.shields.io/crates/v/execgo-runtime.svg)](https://crates.io/crates/execgo-runtime)
 
 ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交、调度、执行与持久化，对外提供 **HTTP API** 与 **CLI**，可作为 ExecGo 控制面背后的执行后端。
 
@@ -51,6 +51,12 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 | 平台 | 依赖 Unix 进程组、信号、`wait4` 等；**Windows 非目标平台** |
 
 ## 安装
+
+### 从 crates.io 安装
+
+```bash
+cargo install execgo-runtime --version 1.0.0-b1
+```
 
 ### 从源码构建（推荐）
 
@@ -194,7 +200,7 @@ EXECGO_RUNTIME_URL=http://127.0.0.1:8080
 
 ## 许可证
 
-仓库根目录若包含 `LICENSE` 文件，以该文件为准。**当前若尚未添加许可证文件**，复制、分发与再许可条件请向维护者确认；也欢迎通过 Issue 推动明确的开源许可证选型。
+本项目使用 `MIT` 许可证发布，完整条款见仓库根目录的 `LICENSE` 文件。
 
 ---
 
