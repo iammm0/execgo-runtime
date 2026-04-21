@@ -1,7 +1,7 @@
 # execgo-runtime
 
 [![CI](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/iammm0/execgo-runtime/actions/workflows/ci.yml)
-[![Rust Edition](https://img.shields.io/badge/rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+[![Rust](https://img.shields.io/badge/rust-1.74%2B-orange.svg)](https://www.rust-lang.org/)
 [![Crates.io](https://img.shields.io/crates/v/execgo-runtime.svg)](https://crates.io/crates/execgo-runtime)
 
 ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交、调度、执行与持久化，对外提供 **HTTP API** 与 **CLI**，可作为 ExecGo 控制面背后的执行后端。
@@ -46,7 +46,7 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 
 | 项目 | 说明 |
 |------|------|
-| Rust | **1.74+**（建议当前 stable，与 CI 一致） |
+| Rust | **1.74+**（MSRV；建议当前 stable，与 CI 一致。`edition = "2021"` 表示语言 edition，不是 Rust 工具链版本） |
 | 操作系统 | 开发与 CI 覆盖 **Linux、macOS**；**沙箱 / cgroup 完整能力仅在 Linux** |
 | 平台 | 依赖 Unix 进程组、信号、`wait4` 等；**Windows 非目标平台** |
 

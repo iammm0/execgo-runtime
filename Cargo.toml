@@ -2,6 +2,7 @@
 name = "execgo-runtime"
 version = "1.0.0-b1"
 edition = "2021"
+rust-version = "1.74"
 description = "Adaptive data-plane runtime for ExecGo with HTTP API, CLI, capability negotiation, and local resource ledger"
 license = "MIT"
 repository = "https://github.com/iammm0/execgo-runtime"
