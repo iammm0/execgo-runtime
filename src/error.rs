@@ -9,8 +9,10 @@ use thiserror::Error;
 
 use crate::types::{ErrorCode, RuntimeErrorInfo};
 
+/// AppResult 是 runtime 内部统一使用的错误返回类型 / is the unified result type used across the runtime.
 pub type AppResult<T> = Result<T, AppError>;
 
+/// AppError 定义 runtime 内部和 HTTP API 共享的错误枚举 / defines the error enum shared by runtime internals and the HTTP API.
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("invalid input: {0}")]
@@ -42,6 +44,7 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// code 将内部错误映射为稳定的 runtime 错误码 / maps an internal error into a stable runtime error code.
     pub fn code(&self) -> ErrorCode {
         match self {
             AppError::InvalidInput(_) => ErrorCode::InvalidInput,
@@ -59,6 +62,7 @@ impl AppError {
         }
     }
 
+    /// status_code 将内部错误映射为 HTTP 状态码 / maps an internal error into an HTTP status code.
     pub fn status_code(&self) -> StatusCode {
         match self {
             AppError::InvalidInput(_) => StatusCode::BAD_REQUEST,
@@ -77,6 +81,7 @@ impl AppError {
         }
     }
 
+    /// as_runtime_error 将内部错误包装为对外暴露的标准错误信封 / wraps the internal error into the normalized public runtime error envelope.
     pub fn as_runtime_error(&self) -> RuntimeErrorInfo {
         RuntimeErrorInfo {
             code: self.code(),
@@ -86,12 +91,14 @@ impl AppError {
     }
 }
 
+/// ErrorEnvelope 是 HTTP 错误响应使用的 JSON 信封 / is the JSON envelope used for HTTP error responses.
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
     error: RuntimeErrorInfo,
 }
 
 impl IntoResponse for AppError {
+    /// into_response 将 AppError 序列化为 axum 响应 / serializes AppError into an axum response.
     fn into_response(self) -> Response {
         let status = self.status_code();
         let body = Json(ErrorEnvelope {
@@ -101,6 +108,7 @@ impl IntoResponse for AppError {
     }
 }
 
+/// json_error 构造轻量 JSON 错误对象，便于测试和辅助输出 / builds a lightweight JSON error object for tests and helper output.
 pub fn json_error(code: ErrorCode, message: impl Into<String>) -> serde_json::Value {
     json!({
         "error": {

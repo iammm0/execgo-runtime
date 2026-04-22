@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
+/// find_free_port 申请一个临时可用端口供测试 runtime 使用 / acquires a temporary free port for the test runtime.
 fn find_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .expect("bind free port")
@@ -18,6 +19,7 @@ fn find_free_port() -> u16 {
         .port()
 }
 
+/// TestServer 封装测试期启动的 runtime 子进程及其临时目录 / wraps the runtime subprocess and temp directory started during tests.
 struct TestServer {
     base_url: String,
     child: Child,
@@ -25,10 +27,12 @@ struct TestServer {
 }
 
 impl TestServer {
+    /// start 使用默认参数启动测试 runtime / starts the test runtime with default arguments.
     async fn start() -> Self {
         Self::start_with_args(&[]).await
     }
 
+    /// start_with_args 使用额外 CLI 参数启动测试 runtime / starts the test runtime with extra CLI arguments.
     async fn start_with_args(extra_args: &[&str]) -> Self {
         let temp = TempDir::new().expect("tempdir");
         let port = find_free_port();
@@ -61,6 +65,7 @@ impl TestServer {
         server
     }
 
+    /// wait_ready 轮询 readyz，直到测试 runtime 可用 / polls readyz until the test runtime becomes available.
     async fn wait_ready(&self) {
         let client = Client::new();
         for _ in 0..100 {
@@ -76,12 +81,14 @@ impl TestServer {
 }
 
 impl Drop for TestServer {
+    /// drop 在测试结束时清理 runtime 子进程 / cleans up the runtime subprocess when the test ends.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// submit_task 通过 HTTP 提交任务并断言请求成功 / submits a task over HTTP and asserts a successful request.
 async fn submit_task(server: &TestServer, payload: Value) -> Value {
     Client::new()
         .post(format!("{}/api/v1/tasks", server.base_url))
@@ -96,6 +103,7 @@ async fn submit_task(server: &TestServer, payload: Value) -> Value {
         .expect("submit json")
 }
 
+/// submit_task_raw 提交任务但保留原始 HTTP 响应，便于断言错误路径 / submits a task while preserving the raw HTTP response for error-path assertions.
 async fn submit_task_raw(server: &TestServer, payload: Value) -> reqwest::Response {
     Client::new()
         .post(format!("{}/api/v1/tasks", server.base_url))
@@ -105,6 +113,7 @@ async fn submit_task_raw(server: &TestServer, payload: Value) -> reqwest::Respon
         .expect("submit request")
 }
 
+/// get_json 拉取任意 JSON 接口并断言成功 / fetches any JSON endpoint and asserts success.
 async fn get_json(server: &TestServer, path: &str) -> Value {
     Client::new()
         .get(format!("{}{}", server.base_url, path))
@@ -118,6 +127,7 @@ async fn get_json(server: &TestServer, path: &str) -> Value {
         .expect("get json")
 }
 
+/// get_status 拉取单个任务状态 / fetches the status of a single task.
 async fn get_status(server: &TestServer, task_id: &str) -> Value {
     Client::new()
         .get(format!("{}/api/v1/tasks/{task_id}", server.base_url))
@@ -131,6 +141,7 @@ async fn get_status(server: &TestServer, task_id: &str) -> Value {
         .expect("status json")
 }
 
+/// wait_terminal 轮询任务直到进入终态 / polls a task until it reaches a terminal state.
 async fn wait_terminal(server: &TestServer, task_id: &str) -> Value {
     for _ in 0..120 {
         let status = get_status(server, task_id).await;
@@ -145,6 +156,7 @@ async fn wait_terminal(server: &TestServer, task_id: &str) -> Value {
     panic!("task did not reach terminal state");
 }
 
+/// command_task_runs_to_success_and_persists_artifacts 验证命令任务可成功执行，并能保留产物与事件流 / verifies that a command task succeeds and persists artifacts and events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_task_runs_to_success_and_persists_artifacts() {
     let server = TestServer::start().await;
@@ -199,6 +211,7 @@ async fn command_task_runs_to_success_and_persists_artifacts() {
     assert!(event_types.contains(&"finished"));
 }
 
+/// cli_run_and_kill_flow_work 验证 submit、kill、run 等 CLI 子命令可串起完整流程 / verifies that submit, kill, and run CLI commands form a complete end-to-end flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_run_and_kill_flow_work() {
     let server = TestServer::start().await;
@@ -269,6 +282,7 @@ async fn cli_run_and_kill_flow_work() {
         .contains("cli-run"));
 }
 
+/// runtime_endpoints_and_resource_snapshot_work 验证 runtime 信息接口与资源账本快照可正常工作 / verifies that runtime info endpoints and resource-ledger snapshots work correctly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_endpoints_and_resource_snapshot_work() {
     let server = TestServer::start_with_args(&[
@@ -344,6 +358,7 @@ async fn runtime_endpoints_and_resource_snapshot_work() {
     assert_eq!(terminal["status"], "success");
 }
 
+/// adaptive_plan_is_visible_and_strict_mode_rejects 验证 adaptive 会降级、strict 会拒绝不支持能力 / verifies that adaptive mode degrades while strict mode rejects unsupported capabilities.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_plan_is_visible_and_strict_mode_rejects() {
     let server = TestServer::start_with_args(&["--disable-linux-sandbox"]).await;

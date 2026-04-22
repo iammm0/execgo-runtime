@@ -2,6 +2,7 @@ use crate::repo::MetricsSnapshot;
 
 const BUCKETS_MS: &[u64] = &[100, 250, 500, 1_000, 5_000, 10_000, 30_000, 60_000, 300_000];
 
+/// render_prometheus 将仓储指标快照渲染为 Prometheus 文本格式 / renders a repository metrics snapshot into Prometheus text format.
 pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
     let mut out = String::new();
     out.push_str(

@@ -11,6 +11,7 @@ use crate::types::{
     RuntimeCapabilities, RuntimePlatform, SandboxCapabilities, StorageCapabilities,
 };
 
+/// CapabilityProbeInput 描述能力探测时依赖的主机配置与覆盖项 / describes host settings and overrides used during capability probing.
 #[derive(Debug, Clone)]
 pub struct CapabilityProbeInput {
     pub runtime_id: String,
@@ -23,6 +24,7 @@ pub struct CapabilityProbeInput {
     pub capacity_pids: Option<u64>,
 }
 
+/// probe_runtime_capabilities 探测宿主机能力并生成可序列化快照 / probes host capabilities and builds a serializable runtime snapshot.
 pub fn probe_runtime_capabilities(input: &CapabilityProbeInput) -> RuntimeCapabilities {
     let mut warnings = Vec::new();
     let mut overrides = BTreeMap::new();
@@ -128,6 +130,7 @@ pub fn probe_runtime_capabilities(input: &CapabilityProbeInput) -> RuntimeCapabi
     }
 }
 
+/// stable_semantics 返回所有环境都应稳定提供的语义能力 / returns semantics that should stay stable across all environments.
 fn stable_semantics() -> Vec<String> {
     [
         "submit",
@@ -145,6 +148,7 @@ fn stable_semantics() -> Vec<String> {
     .collect()
 }
 
+/// enhanced_semantics 返回仅在增强隔离和资源控制可用时暴露的语义 / returns semantics exposed only when stronger isolation and resource controls are available.
 fn enhanced_semantics(linux_sandbox: bool, cgroup_writable: bool) -> Vec<String> {
     let mut items = vec!["resource_ledger".to_string()];
     if linux_sandbox {
@@ -164,6 +168,7 @@ fn enhanced_semantics(linux_sandbox: bool, cgroup_writable: bool) -> Vec<String>
     items
 }
 
+/// data_dir_writable 通过实际写入探针文件判断数据目录是否可写 / checks whether the data directory is writable by writing a probe file.
 fn data_dir_writable(path: &Path) -> bool {
     let probe_path = path.join(format!(".execgo-runtime-probe-{}", std::process::id()));
     match fs::write(&probe_path, b"probe") {
@@ -175,6 +180,7 @@ fn data_dir_writable(path: &Path) -> bool {
     }
 }
 
+/// path_likely_writable 粗略判断路径或其父目录是否具备写权限 / estimates whether a path or its parent directory is writable.
 fn path_likely_writable(path: &Path) -> bool {
     let candidate = if path.exists() {
         path
@@ -186,6 +192,7 @@ fn path_likely_writable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// detect_containerized 基于常见标志文件和 cgroup 信息判断是否在容器内运行 / detects containerized execution from common marker files and cgroup hints.
 fn detect_containerized() -> bool {
     Path::new("/.dockerenv").exists()
         || Path::new("/run/.containerenv").exists()
@@ -196,11 +203,13 @@ fn detect_containerized() -> bool {
         })
 }
 
+/// detect_kubernetes 通过环境变量和 cgroup 线索判断是否运行在 Kubernetes 中 / detects Kubernetes from environment variables and cgroup hints.
 fn detect_kubernetes() -> bool {
     std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
         || read_to_string("/proc/1/cgroup").is_some_and(|contents| contents.contains("kubepods"))
 }
 
+/// detect_memory_bytes 尝试读取宿主机可见物理内存容量 / attempts to read visible host memory capacity.
 fn detect_memory_bytes() -> Option<u64> {
     #[cfg(unix)]
     unsafe {
@@ -213,6 +222,7 @@ fn detect_memory_bytes() -> Option<u64> {
     None
 }
 
+/// detect_pids_capacity 尝试读取系统允许的最大 PID 容量 / attempts to read the system PID capacity.
 fn detect_pids_capacity() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -225,6 +235,7 @@ fn detect_pids_capacity() -> Option<u64> {
     }
 }
 
+/// current_euid 返回当前进程的有效用户 ID / returns the effective user ID of the current process.
 fn current_euid() -> Option<u32> {
     #[cfg(unix)]
     unsafe {
@@ -236,6 +247,7 @@ fn current_euid() -> Option<u32> {
     }
 }
 
+/// read_to_string 读取文本文件并在失败时返回 None / reads a text file and returns None on failure.
 fn read_to_string(path: &str) -> Option<String> {
     fs::read_to_string(path).ok()
 }

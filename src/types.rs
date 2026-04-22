@@ -14,6 +14,7 @@ const DEFAULT_OUTPUT_INLINE_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_WALL_TIME_MS: u64 = 5 * 60 * 1000;
 const CAPABILITY_SNAPSHOT_VERSION: &str = "v1";
 
+/// TaskStatus 表示任务在 runtime 内部的生命周期状态 / represents the task lifecycle state inside the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -25,11 +26,13 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// is_terminal 判断任务状态是否已经进入终态 / reports whether the task status has reached a terminal state.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Success | Self::Failed | Self::Cancelled)
     }
 }
 
+/// ErrorCode 是稳定、机器可读的 runtime 失败分类 / is the stable machine-readable runtime failure category.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -47,6 +50,7 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// RuntimeErrorInfo 是 API 和持久化层共享的标准错误信封 / is the normalized error envelope shared by APIs and persistence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeErrorInfo {
     pub code: ErrorCode,
@@ -55,6 +59,7 @@ pub struct RuntimeErrorInfo {
     pub details: Option<Value>,
 }
 
+/// EventType 描述任务事件流中的结构化事件类型 / describes structured event types in the task event stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
@@ -73,6 +78,7 @@ pub enum EventType {
     Recovered,
 }
 
+/// ExecutionKind 区分直接命令与脚本执行两种入口 / distinguishes direct command execution from script execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionKind {
@@ -80,6 +86,7 @@ pub enum ExecutionKind {
     Script,
 }
 
+/// ExecutionSpec 描述 runtime 要启动的进程或脚本 / describes the process or script that the runtime should launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionSpec {
     pub kind: ExecutionKind,
@@ -96,6 +103,7 @@ pub struct ExecutionSpec {
 }
 
 impl ExecutionSpec {
+    /// validate 校验命令和脚本字段是否互斥且完整 / validates that command and script fields are mutually exclusive and complete.
     pub fn validate(&self) -> AppResult<()> {
         match self.kind {
             ExecutionKind::Command => {
@@ -147,6 +155,7 @@ impl ExecutionSpec {
     }
 }
 
+/// CapabilityMode 控制能力缺失时是严格失败还是自适应降级 / controls whether missing capabilities fail strictly or degrade adaptively.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityMode {
@@ -155,6 +164,7 @@ pub enum CapabilityMode {
     Strict,
 }
 
+/// TaskPolicy 描述单个任务对 runtime 能力协商的策略 / describes per-task runtime capability negotiation policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TaskPolicy {
     #[serde(default)]
@@ -162,11 +172,13 @@ pub struct TaskPolicy {
 }
 
 impl TaskPolicy {
+    /// validate 校验任务策略字段 / validates task policy fields.
     pub fn validate(&self) -> AppResult<()> {
         Ok(())
     }
 }
 
+/// ControlContext 携带上层控制面传入的租户、模式和约束提示 / carries tenant, mode, and constraint hints from the control plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ControlContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +196,7 @@ pub struct ControlContext {
 }
 
 impl ControlContext {
+    /// validate 校验控制面上下文，避免空值和非法标签键 / validates control context values and rejects empty or invalid label keys.
     pub fn validate(&self) -> AppResult<()> {
         if self
             .labels
@@ -211,6 +224,7 @@ impl ControlContext {
     }
 }
 
+/// SandboxProfile 表示任务使用的隔离层级 / represents the isolation level used for a task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProfile {
@@ -219,6 +233,7 @@ pub enum SandboxProfile {
     LinuxSandbox,
 }
 
+/// NamespaceConfig 描述 Linux namespace 的开关集合 / describes the set of Linux namespace toggles.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NamespaceConfig {
     #[serde(default = "default_true")]
@@ -234,6 +249,7 @@ pub struct NamespaceConfig {
 }
 
 impl Default for NamespaceConfig {
+    /// default 启用除网络外的默认 namespace 组合 / enables the default namespace set except networking.
     fn default() -> Self {
         Self {
             mount: true,
@@ -245,6 +261,7 @@ impl Default for NamespaceConfig {
     }
 }
 
+/// SandboxPolicy 描述任务工作目录、rootfs 和 namespace 隔离策略 / describes task workspace, rootfs, and namespace isolation policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxPolicy {
     #[serde(default)]
@@ -260,6 +277,7 @@ pub struct SandboxPolicy {
 }
 
 impl Default for SandboxPolicy {
+    /// default 使用最轻量的进程级隔离 / uses the lightest process-level isolation.
     fn default() -> Self {
         Self {
             profile: SandboxProfile::Process,
@@ -272,6 +290,7 @@ impl Default for SandboxPolicy {
 }
 
 impl SandboxPolicy {
+    /// validate 校验 sandbox 配置的组合是否安全且可解释 / validates that the sandbox configuration is safe and coherent.
     pub fn validate(&self) -> AppResult<()> {
         if let Some(subdir) = &self.workspace_subdir {
             validate_relative_workspace_subdir(subdir)?;
@@ -296,11 +315,13 @@ impl SandboxPolicy {
         Ok(())
     }
 
+    /// effective_namespaces 返回显式配置或默认 namespace 配置 / returns explicit namespace configuration or the default namespace set.
     pub fn effective_namespaces(&self) -> NamespaceConfig {
         self.namespaces.clone().unwrap_or_default()
     }
 }
 
+/// ResourceLimits 描述单个任务的时间、CPU、内存、进程数和输出限制 / describes per-task wall-time, CPU, memory, process-count, and output limits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceLimits {
     #[serde(default = "default_wall_time_ms")]
@@ -318,6 +339,7 @@ pub struct ResourceLimits {
 }
 
 impl Default for ResourceLimits {
+    /// default 返回适合本地安全执行的默认资源限制 / returns default resource limits for safe local execution.
     fn default() -> Self {
         Self {
             wall_time_ms: default_wall_time_ms(),
@@ -331,6 +353,7 @@ impl Default for ResourceLimits {
 }
 
 impl ResourceLimits {
+    /// validate 校验资源限制是否为正且可执行 / validates that resource limits are positive and enforceable.
     pub fn validate(&self) -> AppResult<()> {
         if self.wall_time_ms == 0 {
             return Err(AppError::InvalidInput(
@@ -346,6 +369,7 @@ impl ResourceLimits {
     }
 }
 
+/// ResourceEnforcementPlan 记录实际会被 runtime 执行的资源约束 / records the resource constraints that the runtime will actually enforce.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceEnforcementPlan {
     pub wall_time_ms: u64,
@@ -367,6 +391,7 @@ pub struct ResourceEnforcementPlan {
     pub oom_detection: bool,
 }
 
+/// ExecutionPlan 保存请求策略与实际执行策略的差异 / stores the difference between requested policy and actual execution policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionPlan {
     #[serde(default)]
@@ -383,6 +408,7 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// legacy 为旧记录构造兼容执行计划 / builds a compatible execution plan for legacy records.
     pub fn legacy(sandbox: SandboxPolicy, limits: ResourceLimits) -> Self {
         let cgroup_enforced = matches!(sandbox.profile, SandboxProfile::LinuxSandbox);
         Self {
@@ -407,6 +433,7 @@ impl ExecutionPlan {
     }
 }
 
+/// TaskResourceReservation 是调度前需要占用的资源账本额度 / is the resource ledger quota reserved before dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskResourceReservation {
     pub task_slots: u64,
@@ -417,6 +444,7 @@ pub struct TaskResourceReservation {
 }
 
 impl TaskResourceReservation {
+    /// from_limits 将任务限制转换为调度预留额度 / converts task limits into dispatch-time reservation quota.
     pub fn from_limits(limits: &ResourceLimits) -> Self {
         Self {
             task_slots: 1,
@@ -426,6 +454,7 @@ impl TaskResourceReservation {
     }
 }
 
+/// SubmitTaskRequest 是创建 runtime 任务的外部 API 请求体 / is the external API request body for creating a runtime task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubmitTaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +473,7 @@ pub struct SubmitTaskRequest {
 }
 
 impl SubmitTaskRequest {
+    /// validate 校验提交请求的所有子契约 / validates all nested contracts in a submit request.
     pub fn validate(&self) -> AppResult<()> {
         if let Some(task_id) = &self.task_id {
             validate_task_id(task_id)?;
@@ -461,6 +491,7 @@ impl SubmitTaskRequest {
     }
 }
 
+/// SubmitTaskResponse 是任务提交成功后的最小 handle 响应 / is the minimal handle response after successful task submission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubmitTaskResponse {
     pub task_id: String,
@@ -468,6 +499,7 @@ pub struct SubmitTaskResponse {
     pub status: TaskStatus,
 }
 
+/// ResourceUsage 记录任务结束后的资源使用摘要 / records the resource usage summary after task completion.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResourceUsage {
     pub duration_ms: u64,
@@ -481,6 +513,7 @@ pub struct ResourceUsage {
     pub memory_peak_bytes: Option<u64>,
 }
 
+/// TaskArtifacts 暴露任务目录和关键产物路径 / exposes the task directory and key artifact paths.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskArtifacts {
     pub task_dir: String,
@@ -492,6 +525,7 @@ pub struct TaskArtifacts {
     pub script_path: Option<String>,
 }
 
+/// TaskStatusResponse 是查询单个任务时返回的完整状态快照 / is the full status snapshot returned when querying a single task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskStatusResponse {
     pub task_id: String,
@@ -532,6 +566,7 @@ pub struct TaskStatusResponse {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// EventRecord 表示持久化事件流中的一条事件 / represents one persisted event in the task event stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventRecord {
     pub seq: i64,
@@ -544,12 +579,14 @@ pub struct EventRecord {
     pub data: Option<Value>,
 }
 
+/// HealthResponse 是 healthz 和 readyz 的轻量响应 / is the lightweight response for healthz and readyz.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
 }
 
+/// RuntimePlatform 描述 runtime 当前宿主平台 / describes the current host platform of the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePlatform {
     pub os: String,
@@ -558,6 +595,7 @@ pub struct RuntimePlatform {
     pub kubernetes: bool,
 }
 
+/// ExecutionCapabilities 描述 runtime 可启动的执行类型 / describes the execution types the runtime can launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionCapabilities {
     pub command: bool,
@@ -565,6 +603,7 @@ pub struct ExecutionCapabilities {
     pub process_group: bool,
 }
 
+/// NamespaceCapabilities 描述各类 Linux namespace 是否可用 / describes whether each Linux namespace is available.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NamespaceCapabilities {
     pub mount: bool,
@@ -574,6 +613,7 @@ pub struct NamespaceCapabilities {
     pub net: bool,
 }
 
+/// SandboxCapabilities 描述 runtime 的隔离能力集合 / describes the runtime sandbox capability set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxCapabilities {
     pub process: bool,
@@ -582,11 +622,13 @@ pub struct SandboxCapabilities {
     pub namespaces: NamespaceCapabilities,
 }
 
+/// StorageCapabilities 描述 runtime 的本地存储能力 / describes the runtime local storage capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageCapabilities {
     pub data_dir_writable: bool,
 }
 
+/// ResourceCapacity 描述资源账本的容量或占用量 / describes resource ledger capacity or reserved usage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceCapacity {
     pub task_slots: u64,
@@ -596,6 +638,7 @@ pub struct ResourceCapacity {
     pub pids: Option<u64>,
 }
 
+/// ResourceCapabilities 描述 runtime 可执行的资源限制能力 / describes resource-limit capabilities available in the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceCapabilities {
     pub rlimit_cpu: bool,
@@ -610,6 +653,7 @@ pub struct ResourceCapabilities {
     pub capacity: ResourceCapacity,
 }
 
+/// RuntimeCapabilities 是 runtime 对外暴露的能力快照 / is the runtime capability snapshot exposed to callers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeCapabilities {
     pub runtime_id: String,
@@ -633,11 +677,13 @@ pub struct RuntimeCapabilities {
 }
 
 impl RuntimeCapabilities {
+    /// snapshot_version 返回能力快照契约版本 / returns the capability snapshot contract version.
     pub fn snapshot_version() -> &'static str {
         CAPABILITY_SNAPSHOT_VERSION
     }
 }
 
+/// RuntimeInfoResponse 是 runtime 基础信息响应 / is the runtime basic information response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeInfoResponse {
     pub runtime_id: String,
@@ -647,6 +693,7 @@ pub struct RuntimeInfoResponse {
     pub platform: RuntimePlatform,
 }
 
+/// RuntimeConfigResponse 是 runtime 当前配置快照 / is the runtime current configuration snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfigResponse {
     pub runtime_id: String,
@@ -663,6 +710,7 @@ pub struct RuntimeConfigResponse {
     pub cgroup_enabled: bool,
 }
 
+/// ActiveTaskReservation 描述一个仍在占用资源的任务预留 / describes a task reservation that is still consuming resources.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActiveTaskReservation {
     pub task_id: String,
@@ -672,6 +720,7 @@ pub struct ActiveTaskReservation {
     pub reserved_at: Option<DateTime<Utc>>,
 }
 
+/// RuntimeResourcesResponse 是 runtime 资源账本的外部视图 / is the external view of the runtime resource ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeResourcesResponse {
     pub runtime_id: String,
@@ -683,6 +732,7 @@ pub struct RuntimeResourcesResponse {
     pub accepted_waiting_tasks: u64,
 }
 
+/// validate_task_id 校验 task_id 是否安全可用于路径和查询 / validates that task_id is safe for paths and lookups.
 pub fn validate_task_id(task_id: &str) -> AppResult<()> {
     let trimmed = task_id.trim();
     if trimmed.is_empty() {
@@ -699,6 +749,7 @@ pub fn validate_task_id(task_id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// resolve_workspace_dir 解析任务最终工作目录 / resolves the final task workspace directory.
 pub fn resolve_workspace_dir(task_dir: &Path, sandbox: &SandboxPolicy) -> AppResult<PathBuf> {
     let base = task_dir.join("workspace");
     if let Some(subdir) = &sandbox.workspace_subdir {
@@ -709,10 +760,12 @@ pub fn resolve_workspace_dir(task_dir: &Path, sandbox: &SandboxPolicy) -> AppRes
     }
 }
 
+/// default_output_inline_bytes 返回 stdout/stderr 默认内联读取上限 / returns the default inline read limit for stdout and stderr.
 pub fn default_output_inline_bytes() -> u64 {
     DEFAULT_OUTPUT_INLINE_BYTES
 }
 
+/// default_wall_time_ms 返回默认墙钟超时时间 / returns the default wall-clock timeout.
 pub fn default_wall_time_ms() -> u64 {
     DEFAULT_WALL_TIME_MS
 }

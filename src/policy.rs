@@ -6,6 +6,7 @@ use crate::{
     },
 };
 
+/// resolve_execution_plan 将用户请求与 runtime 能力协商为最终执行计划 / negotiates the user request against runtime capabilities into a final execution plan.
 pub fn resolve_execution_plan(
     request: &SubmitTaskRequest,
     capabilities: &RuntimeCapabilities,
@@ -161,6 +162,7 @@ pub fn resolve_execution_plan(
     })
 }
 
+/// effective_capability_mode 解析任务生效的能力模式 / resolves the effective capability mode for a task.
 pub fn effective_capability_mode(
     request: &SubmitTaskRequest,
     default_mode: CapabilityMode,
@@ -172,6 +174,7 @@ pub fn effective_capability_mode(
         .unwrap_or(default_mode)
 }
 
+/// namespace_or_fallback 在 strict 模式下报错，在 adaptive 模式下回退缺失的 namespace / errors in strict mode and falls back in adaptive mode when a namespace is unavailable.
 fn namespace_or_fallback(
     requested: bool,
     supported: bool,

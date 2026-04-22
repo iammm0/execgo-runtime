@@ -15,11 +15,13 @@ use crate::{
     },
 };
 
+/// Repository 封装 runtime 的 SQLite 持久化入口 / wraps the SQLite persistence entrypoint for the runtime.
 #[derive(Debug, Clone)]
 pub struct Repository {
     db_path: PathBuf,
 }
 
+/// TaskRecord 是单个任务在数据库中的完整持久化镜像 / is the full persisted database image of a single task.
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
     pub task_id: String,
@@ -62,6 +64,7 @@ pub struct TaskRecord {
     pub released_at: Option<DateTime<Utc>>,
 }
 
+/// NewTaskRecord 是首次插入任务时需要落盘的字段集合 / is the set of fields required when a task is first inserted.
 #[derive(Debug, Clone)]
 pub struct NewTaskRecord {
     pub task_id: String,
@@ -77,6 +80,7 @@ pub struct NewTaskRecord {
     pub control_context: Option<ControlContext>,
 }
 
+/// CompletionUpdate 描述任务结束时需要回写的终态信息 / describes the terminal state written back when a task finishes.
 #[derive(Debug, Clone)]
 pub struct CompletionUpdate {
     pub status: TaskStatus,
@@ -89,6 +93,7 @@ pub struct CompletionUpdate {
     pub result_json: Option<Value>,
 }
 
+/// MetricsSnapshot 是从任务表聚合得到的指标摘要 / is the metrics summary aggregated from the task table.
 #[derive(Debug, Clone, Default)]
 pub struct MetricsSnapshot {
     pub by_status: std::collections::BTreeMap<String, u64>,
@@ -97,12 +102,14 @@ pub struct MetricsSnapshot {
 }
 
 impl TaskRecord {
+    /// has_active_reservation 判断任务是否仍持有未释放的资源预留 / reports whether the task still holds an unreleased resource reservation.
     pub fn has_active_reservation(&self) -> bool {
         self.reservation.is_some() && self.released_at.is_none()
     }
 }
 
 impl Repository {
+    /// new 创建指向指定 SQLite 文件的仓储实例 / creates a repository bound to the given SQLite database file.
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
@@ -113,6 +120,7 @@ impl Repository {
         &self.db_path
     }
 
+    /// init 初始化任务表、事件表以及兼容性迁移列 / initializes task tables, event tables, and compatibility migration columns.
     pub fn init(&self) -> AppResult<()> {
         if let Some(parent) = self.db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -187,6 +195,7 @@ impl Repository {
         Ok(())
     }
 
+    /// insert_task 在单个事务内插入任务主记录和初始事件 / inserts the task row and initial events in a single transaction.
     pub fn insert_task(&self, new_task: &NewTaskRecord) -> AppResult<()> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -276,6 +285,7 @@ impl Repository {
         Ok(())
     }
 
+    /// get_task 按 task_id 读取完整任务记录 / loads the full task record by task_id.
     pub fn get_task(&self, task_id: &str) -> AppResult<TaskRecord> {
         let conn = self.connect()?;
         let task = conn
@@ -288,6 +298,7 @@ impl Repository {
         task.ok_or_else(|| AppError::NotFound(task_id.to_string()))
     }
 
+    /// list_events 返回任务的持久化事件流 / returns the persisted event stream of a task.
     pub fn list_events(&self, task_id: &str) -> AppResult<Vec<EventRecord>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
@@ -318,6 +329,7 @@ impl Repository {
         self.count_by_status(TaskStatus::Running)
     }
 
+    /// count_by_status 统计指定状态的任务数量 / counts tasks in the given status.
     pub fn count_by_status(&self, status: TaskStatus) -> AppResult<u64> {
         let conn = self.connect()?;
         let count: i64 = conn.query_row(
@@ -328,6 +340,7 @@ impl Repository {
         Ok(count.max(0) as u64)
     }
 
+    /// list_accepted 按创建时间返回待调度任务 / returns accepted tasks ordered by creation time for dispatch.
     pub fn list_accepted(&self, limit: usize) -> AppResult<Vec<TaskRecord>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
@@ -341,6 +354,7 @@ impl Repository {
         Ok(items)
     }
 
+    /// list_non_terminal 返回恢复流程需要关注的未终态任务 / returns non-terminal tasks that recovery logic must inspect.
     pub fn list_non_terminal(&self) -> AppResult<Vec<TaskRecord>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
@@ -354,6 +368,7 @@ impl Repository {
         Ok(items)
     }
 
+    /// list_active_reservations 返回当前仍占用资源账本额度的任务 / returns tasks that still hold resource ledger reservations.
     pub fn list_active_reservations(&self) -> AppResult<Vec<TaskRecord>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
@@ -367,6 +382,7 @@ impl Repository {
         Ok(items)
     }
 
+    /// count_accepted_waiting 统计还未拿到资源预留的 accepted 任务 / counts accepted tasks that are still waiting for a reservation.
     pub fn count_accepted_waiting(&self) -> AppResult<u64> {
         let conn = self.connect()?;
         let count: i64 = conn.query_row(
@@ -377,6 +393,7 @@ impl Repository {
         Ok(count.max(0) as u64)
     }
 
+    /// mark_dispatched 标记任务已被 shim 接管调度 / marks a task as dispatched to the shim process.
     pub fn mark_dispatched(&self, task_id: &str, shim_pid: u32) -> AppResult<()> {
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
@@ -387,6 +404,7 @@ impl Repository {
         Ok(())
     }
 
+    /// mark_started 标记任务实际业务进程已启动 / marks that the actual workload process has started.
     pub fn mark_started(
         &self,
         task_id: &str,
@@ -412,6 +430,7 @@ impl Repository {
         Ok(())
     }
 
+    /// reserve_resources 为任务记录资源预留并写入事件 / records a resource reservation for the task and emits an event.
     pub fn reserve_resources(
         &self,
         task_id: &str,
@@ -440,6 +459,7 @@ impl Repository {
         Ok(())
     }
 
+    /// release_resources 释放任务资源预留并写入事件 / releases the task reservation and emits an event.
     pub fn release_resources(&self, task_id: &str, message: &str) -> AppResult<()> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -470,6 +490,7 @@ impl Repository {
         Ok(())
     }
 
+    /// set_cancel_requested 标记任务收到取消请求 / marks that the task has received a cancellation request.
     pub fn set_cancel_requested(&self, task_id: &str) -> AppResult<TaskRecord> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -489,6 +510,7 @@ impl Repository {
         self.get_task(task_id)
     }
 
+    /// mark_timeout_triggered 记录任务已命中 wall time 超时 / records that the task has hit the wall-time timeout.
     pub fn mark_timeout_triggered(&self, task_id: &str) -> AppResult<()> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -508,6 +530,7 @@ impl Repository {
         Ok(())
     }
 
+    /// cancel_accepted_task 将尚未启动的 accepted 任务直接转为 cancelled / converts an accepted-but-not-started task directly into cancelled.
     pub fn cancel_accepted_task(&self, task_id: &str, error: RuntimeErrorInfo) -> AppResult<()> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -571,6 +594,7 @@ impl Repository {
         Ok(())
     }
 
+    /// complete_task 写入终态、错误、资源使用和释放事件 / writes terminal state, error details, resource usage, and release events.
     pub fn complete_task(&self, task_id: &str, update: &CompletionUpdate) -> AppResult<()> {
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
@@ -649,6 +673,7 @@ impl Repository {
         Ok(())
     }
 
+    /// mark_recovered 记录运行中任务在恢复流程中被重新接管 / records that a running task was successfully reattached during recovery.
     pub fn mark_recovered(&self, task_id: &str) -> AppResult<()> {
         let now = Utc::now();
         let conn = self.connect()?;
@@ -668,6 +693,7 @@ impl Repository {
         Ok(())
     }
 
+    /// mark_recovery_lost 将恢复失败的任务标记为内部错误 / marks a task as internal failure when recovery loses ownership.
     pub fn mark_recovery_lost(&self, task_id: &str) -> AppResult<()> {
         let update = CompletionUpdate {
             status: TaskStatus::Failed,
@@ -686,6 +712,7 @@ impl Repository {
         self.complete_task(task_id, &update)
     }
 
+    /// is_cancel_requested 查询任务是否收到取消信号 / checks whether cancellation has been requested for the task.
     pub fn is_cancel_requested(&self, task_id: &str) -> AppResult<bool> {
         let conn = self.connect()?;
         let flag: i64 = conn.query_row(
@@ -696,6 +723,7 @@ impl Repository {
         Ok(flag != 0)
     }
 
+    /// list_gc_candidates 列出超过保留期、可被回收的终态任务 / lists terminal tasks that exceeded retention and can be garbage-collected.
     pub fn list_gc_candidates(&self, finished_before: DateTime<Utc>) -> AppResult<Vec<TaskRecord>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
@@ -712,12 +740,14 @@ impl Repository {
         Ok(items)
     }
 
+    /// delete_task 删除任务主记录及其级联事件 / deletes the task row and its cascaded events.
     pub fn delete_task(&self, task_id: &str) -> AppResult<()> {
         let conn = self.connect()?;
         conn.execute("DELETE FROM tasks WHERE task_id = ?1", params![task_id])?;
         Ok(())
     }
 
+    /// metrics_snapshot 聚合状态、错误码和时长指标 / aggregates status, error-code, and duration metrics.
     pub fn metrics_snapshot(&self) -> AppResult<MetricsSnapshot> {
         let conn = self.connect()?;
         let mut snapshot = MetricsSnapshot::default();
@@ -752,6 +782,7 @@ impl Repository {
         Ok(snapshot)
     }
 
+    /// connect 打开 SQLite 连接并配置基础 pragma / opens a SQLite connection and configures baseline pragmas.
     fn connect(&self) -> AppResult<Connection> {
         let conn = Connection::open(&self.db_path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -761,10 +792,12 @@ impl Repository {
     }
 }
 
+/// generate_task_id 生成新的随机任务 ID / generates a new random task ID.
 pub fn generate_task_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// ensure_task_column 在迁移场景下补齐缺失列 / adds a missing task table column during lightweight migrations.
 fn ensure_task_column(conn: &Connection, name: &str, definition: &str) -> AppResult<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -780,6 +813,7 @@ fn ensure_task_column(conn: &Connection, name: &str, definition: &str) -> AppRes
     Ok(())
 }
 
+/// row_to_task_record 将数据库行解码为完整任务记录 / decodes a database row into a full task record.
 fn row_to_task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
         task_id: row.get("task_id")?,
@@ -860,6 +894,7 @@ fn row_to_task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 
+/// insert_event_tx 在现有事务内追加一条任务事件 / appends a task event within an existing transaction.
 fn insert_event_tx(
     tx: &rusqlite::Transaction<'_>,
     task_id: &str,
@@ -880,20 +915,24 @@ fn insert_event_tx(
     Ok(())
 }
 
+/// to_json 将结构体编码为 JSON 文本以便写入 SQLite / encodes a value into JSON text for SQLite persistence.
 fn to_json<T: Serialize>(value: &T) -> AppResult<String> {
     Ok(serde_json::to_string(value)?)
 }
 
+/// from_json 将 SQLite 中的 JSON 文本反序列化为目标类型 / deserializes JSON text stored in SQLite into the target type.
 fn from_json<T: DeserializeOwned>(raw: String) -> rusqlite::Result<T> {
     serde_json::from_str(&raw).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
     })
 }
 
+/// opt_json_value 将可选 JSON 字符串解码为 serde_json::Value / decodes an optional JSON string into serde_json::Value.
 fn opt_json_value(raw: Option<String>) -> rusqlite::Result<Option<Value>> {
     raw.map(from_json).transpose()
 }
 
+/// encode_status 将 TaskStatus 转为稳定的数据库枚举字符串 / converts TaskStatus into the stable database enum string.
 fn encode_status(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Accepted => "accepted",
@@ -904,6 +943,7 @@ fn encode_status(status: TaskStatus) -> &'static str {
     }
 }
 
+/// decode_status 将数据库状态字符串还原为 TaskStatus / restores TaskStatus from the database status string.
 fn decode_status(value: &str) -> rusqlite::Result<TaskStatus> {
     match value {
         "accepted" => Ok(TaskStatus::Accepted),
@@ -919,6 +959,7 @@ fn decode_status(value: &str) -> rusqlite::Result<TaskStatus> {
     }
 }
 
+/// encode_error_code 将 ErrorCode 转为稳定的数据库字符串 / converts ErrorCode into the stable database string.
 fn encode_error_code(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::InvalidInput => "invalid_input",
@@ -936,6 +977,7 @@ fn encode_error_code(code: ErrorCode) -> &'static str {
     }
 }
 
+/// decode_error_code 将数据库错误码字符串还原为 ErrorCode / restores ErrorCode from the database error-code string.
 fn decode_error_code(value: &str) -> rusqlite::Result<ErrorCode> {
     match value {
         "invalid_input" => Ok(ErrorCode::InvalidInput),
@@ -958,6 +1000,7 @@ fn decode_error_code(value: &str) -> rusqlite::Result<ErrorCode> {
     }
 }
 
+/// encode_event_type 将事件类型转为数据库字符串 / converts an event type into the database string representation.
 fn encode_event_type(event_type: EventType) -> &'static str {
     match event_type {
         EventType::Submitted => "submitted",
@@ -976,6 +1019,7 @@ fn encode_event_type(event_type: EventType) -> &'static str {
     }
 }
 
+/// decode_event_type 将数据库事件类型字符串还原为枚举 / restores an event type enum from the database string.
 fn decode_event_type(value: &str) -> rusqlite::Result<EventType> {
     match value {
         "submitted" => Ok(EventType::Submitted),
@@ -999,6 +1043,7 @@ fn decode_event_type(value: &str) -> rusqlite::Result<EventType> {
     }
 }
 
+/// ts_millis_to_utc 将毫秒时间戳转为 UTC 时间 / converts a millisecond timestamp into a UTC datetime.
 fn ts_millis_to_utc(value: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(value)
         .single()

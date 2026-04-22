@@ -41,6 +41,7 @@ use crate::{
     },
 };
 
+/// Settings 汇总 runtime server、存储和资源控制的静态配置 / aggregates static configuration for the runtime server, storage, and resource controls.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub runtime_id: String,
@@ -63,6 +64,7 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// from_args 从 CLI 参数构造完整 runtime 配置 / builds the full runtime configuration from CLI arguments.
     pub fn from_args(args: &ServeArgs) -> Self {
         let data_dir = args.data_dir.clone();
         let tasks_dir = data_dir.join("tasks");
@@ -92,6 +94,7 @@ impl Settings {
     }
 }
 
+/// RuntimeService 组合 HTTP API、仓储、能力快照和资源账本 / combines the HTTP API, repository, capability snapshot, and resource ledger.
 #[derive(Clone)]
 pub struct RuntimeService {
     settings: Arc<Settings>,
@@ -103,6 +106,7 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
+    /// new 初始化运行目录、数据库、能力探测和资源账本 / initializes runtime directories, database, capability probing, and the resource ledger.
     pub async fn new(settings: Settings) -> AppResult<Self> {
         let started_at = Utc::now();
         fs::create_dir_all(&settings.data_dir)?;
@@ -142,6 +146,7 @@ impl RuntimeService {
         self.capabilities.clone()
     }
 
+    /// submit_task 校验请求、解析执行计划并持久化为 accepted 任务 / validates a request, resolves the execution plan, and persists it as an accepted task.
     pub async fn submit_task(&self, request: SubmitTaskRequest) -> AppResult<SubmitTaskResponse> {
         request.validate()?;
         let execution_plan = resolve_execution_plan(
@@ -216,6 +221,7 @@ impl RuntimeService {
         self.repo.list_events(task_id)
     }
 
+    /// kill_task 取消任务，并在需要时向已有进程发送终止信号 / cancels a task and sends termination signals when a process already exists.
     pub async fn kill_task(&self, task_id: &str) -> AppResult<TaskStatusResponse> {
         let task = self.repo.get_task(task_id)?;
         if task.status.is_terminal() {
@@ -245,6 +251,7 @@ impl RuntimeService {
         Ok(())
     }
 
+    /// metrics 渲染 Prometheus 指标输出 / renders Prometheus metrics output.
     pub async fn metrics(&self) -> impl IntoResponse {
         match self.repo.metrics_snapshot() {
             Ok(snapshot) => (
@@ -323,6 +330,7 @@ impl RuntimeService {
         })
     }
 
+    /// start_background_loops 启动调度循环和 GC 循环 / starts the dispatcher loop and the GC loop.
     pub fn start_background_loops(&self) {
         let dispatcher_service = self.clone();
         tokio::spawn(async move {
@@ -335,6 +343,7 @@ impl RuntimeService {
         });
     }
 
+    /// recover 在服务启动时恢复未终态任务与资源预留 / recovers non-terminal tasks and reservations during service startup.
     pub async fn recover(&self) -> AppResult<()> {
         for task in self.repo.list_non_terminal()? {
             match task.status {
@@ -375,6 +384,7 @@ impl RuntimeService {
         Ok(())
     }
 
+    /// dispatcher_loop 持续尝试从 accepted 队列分发任务 / continuously attempts to dispatch tasks from the accepted queue.
     async fn dispatcher_loop(&self) {
         loop {
             if let Err(err) = self.dispatch_once().await {
@@ -387,6 +397,7 @@ impl RuntimeService {
         }
     }
 
+    /// dispatch_once 执行一次调度周期，预留资源并启动内部 shim / executes one dispatch cycle by reserving resources and starting the internal shim.
     async fn dispatch_once(&self) -> AppResult<()> {
         let active_reservations = self.repo.list_active_reservations()?;
         let mut current_reserved = self.ledger.reserved_capacity(
@@ -473,6 +484,7 @@ impl RuntimeService {
         Ok(())
     }
 
+    /// gc_loop 定期回收超过保留期的任务目录和数据库记录 / periodically garbage-collects task directories and database rows past retention.
     async fn gc_loop(&self) {
         loop {
             sleep(self.settings.gc_interval).await;
@@ -499,6 +511,7 @@ impl RuntimeService {
         }
     }
 
+    /// spawn_escalation 在宽限期后升级为 SIGKILL / escalates termination to SIGKILL after the grace period.
     fn spawn_escalation(&self, task_id: String, pgid: Option<i32>) {
         let repo = self.repo.clone();
         let grace = self.settings.termination_grace;
@@ -517,6 +530,7 @@ impl RuntimeService {
     }
 }
 
+/// run 是 runtime CLI 的统一入口 / is the unified entrypoint for the runtime CLI.
 pub async fn run(cli: Cli) -> AppResult<()> {
     init_tracing();
     match cli.command {
@@ -530,6 +544,7 @@ pub async fn run(cli: Cli) -> AppResult<()> {
     }
 }
 
+/// run_server 启动 HTTP server 并挂载后台循环 / starts the HTTP server and attaches background loops.
 async fn run_server(args: ServeArgs) -> AppResult<()> {
     let service = RuntimeService::new(Settings::from_args(&args)).await?;
     service.recover().await?;
@@ -544,6 +559,7 @@ async fn run_server(args: ServeArgs) -> AppResult<()> {
         .map_err(|err| AppError::Internal(format!("server error: {err}")))
 }
 
+/// submit_remote 调用远程 runtime 的 submit API / calls the remote runtime submit API.
 async fn submit_remote(args: RemoteTaskArgs) -> AppResult<()> {
     let client = http_client();
     let request = load_request(&args)?;
@@ -555,6 +571,7 @@ async fn submit_remote(args: RemoteTaskArgs) -> AppResult<()> {
     print_json_response(response).await
 }
 
+/// status_remote 调用远程 runtime 的 status API / calls the remote runtime status API.
 async fn status_remote(args: StatusArgs) -> AppResult<()> {
     let client = http_client();
     let response = client
@@ -568,6 +585,7 @@ async fn status_remote(args: StatusArgs) -> AppResult<()> {
     print_json_response(response).await
 }
 
+/// kill_remote 调用远程 runtime 的 kill API / calls the remote runtime kill API.
 async fn kill_remote(args: StatusArgs) -> AppResult<()> {
     let client = http_client();
     let response = client
@@ -581,6 +599,7 @@ async fn kill_remote(args: StatusArgs) -> AppResult<()> {
     print_json_response(response).await
 }
 
+/// wait_remote 轮询远程任务直到终态或超时 / polls a remote task until it reaches a terminal state or times out.
 async fn wait_remote(args: WaitArgs) -> AppResult<()> {
     let client = http_client();
     let start = Instant::now();
@@ -612,6 +631,7 @@ async fn wait_remote(args: WaitArgs) -> AppResult<()> {
     }
 }
 
+/// run_remote 远程提交后立即等待任务结束 / submits remotely and immediately waits for task completion.
 async fn run_remote(args: RemoteTaskArgs) -> AppResult<()> {
     let request = load_request(&args)?;
     let client = http_client();
@@ -633,6 +653,7 @@ async fn run_remote(args: RemoteTaskArgs) -> AppResult<()> {
     .await
 }
 
+/// run_internal_shim 在子进程中拉起真实工作负载并等待完成 / launches the actual workload in a subprocess and waits for completion inside the shim.
 async fn run_internal_shim(args: InternalShimArgs) -> AppResult<()> {
     let repo = Repository::new(args.database.clone());
     repo.init()?;
@@ -726,6 +747,7 @@ async fn run_internal_shim(args: InternalShimArgs) -> AppResult<()> {
     Ok(())
 }
 
+/// SpawnedProcess 保存已启动 workload 进程的关键信息 / stores key information about a launched workload process.
 #[derive(Debug)]
 struct SpawnedProcess {
     pid: u32,
@@ -734,11 +756,13 @@ struct SpawnedProcess {
     cgroup_dir: Option<PathBuf>,
 }
 
+/// WaitOutcome 包装等待进程结束后的归类结果 / wraps the classified completion result after waiting for process exit.
 #[derive(Debug)]
 struct WaitOutcome {
     completion: CompletionUpdate,
 }
 
+/// spawn_task_process 根据任务和执行计划启动真实工作负载 / launches the actual workload from a task record and execution plan.
 fn spawn_task_process(
     task: &TaskRecord,
     execution_plan: &ExecutionPlan,
@@ -796,6 +820,7 @@ fn spawn_task_process(
     })
 }
 
+/// build_command 根据 command/script 任务形态构造可执行命令 / builds the executable command for either command-style or script-style tasks.
 fn build_command(
     task: &TaskRecord,
     stdout_file: File,
@@ -855,6 +880,7 @@ fn build_command(
     Ok((command, script_path))
 }
 
+/// supervise_wait 负责等待进程退出，并处理超时、取消和信号升级 / waits for process completion while handling timeout, cancellation, and signal escalation.
 async fn supervise_wait(
     repo: &Repository,
     task: &TaskRecord,
@@ -921,6 +947,7 @@ async fn supervise_wait(
     }
 }
 
+/// WaitUsage 汇总 wait4 返回的退出码和资源使用数据 / summarizes exit codes and resource usage returned by wait4.
 #[derive(Debug)]
 struct WaitUsage {
     exit_code: Option<i32>,
@@ -930,6 +957,7 @@ struct WaitUsage {
     max_rss_bytes: Option<u64>,
 }
 
+/// classify_completion 将 wait 结果映射为持久化终态 / maps wait results into the persisted terminal state.
 fn classify_completion(
     _task: &TaskRecord,
     usage: WaitUsage,
@@ -1029,6 +1057,7 @@ fn classify_completion(
     }
 }
 
+/// build_status_response 组装对外暴露的任务状态响应 / assembles the externally exposed task status response.
 fn build_status_response(task: &TaskRecord) -> AppResult<TaskStatusResponse> {
     let (stdout, stdout_truncated) = read_output_preview(&task.stdout_path, task.stdout_max_bytes)?;
     let (stderr, stderr_truncated) = read_output_preview(&task.stderr_path, task.stderr_max_bytes)?;
@@ -1084,10 +1113,12 @@ fn build_status_response(task: &TaskRecord) -> AppResult<TaskStatusResponse> {
     })
 }
 
+/// legacy_execution_plan 为缺少 execution_plan 的旧记录构造兼容计划 / builds a compatible plan for older records that do not store execution_plan.
 fn legacy_execution_plan(task: &TaskRecord) -> ExecutionPlan {
     ExecutionPlan::legacy(task.sandbox.clone(), task.limits.clone())
 }
 
+/// add_reservation 将单个预留叠加到当前保留容量 / adds one reservation into the current reserved capacity.
 fn add_reservation(current: &mut ResourceCapacity, reservation: &TaskResourceReservation) {
     current.task_slots = current.task_slots.saturating_add(reservation.task_slots);
     if let Some(value) = reservation.memory_bytes {
@@ -1098,6 +1129,7 @@ fn add_reservation(current: &mut ResourceCapacity, reservation: &TaskResourceRes
     }
 }
 
+/// subtract_reservation 从当前保留容量中扣减单个预留 / subtracts one reservation from the current reserved capacity.
 fn subtract_reservation(current: &mut ResourceCapacity, reservation: &TaskResourceReservation) {
     current.task_slots = current.task_slots.saturating_sub(reservation.task_slots);
     if let Some(value) = reservation.memory_bytes {
@@ -1110,6 +1142,7 @@ fn subtract_reservation(current: &mut ResourceCapacity, reservation: &TaskResour
     }
 }
 
+/// persist_latest_result 将最新任务状态快照写入 result.json / writes the latest task status snapshot into result.json.
 fn persist_latest_result(repo: &Repository, task_id: &str) -> AppResult<()> {
     let task = repo.get_task(task_id)?;
     let response = build_status_response(&task)?;
@@ -1117,6 +1150,7 @@ fn persist_latest_result(repo: &Repository, task_id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// signal_task_termination 向任务进程组或单进程发送信号 / sends a signal to the task process group or single process.
 fn signal_task_termination(task: &TaskRecord, signal: Signal) -> AppResult<()> {
     if let Some(pgid) = task.pgid {
         killpg(Pid::from_raw(pgid), signal)
@@ -1128,6 +1162,7 @@ fn signal_task_termination(task: &TaskRecord, signal: Signal) -> AppResult<()> {
     Ok(())
 }
 
+/// infer_script_name 根据解释器推断脚本文件扩展名 / infers the script filename extension from the interpreter.
 fn infer_script_name(interpreter: Option<&str>) -> &'static str {
     match interpreter.unwrap_or_default() {
         value if value.contains("python") => "script.py",
@@ -1138,6 +1173,7 @@ fn infer_script_name(interpreter: Option<&str>) -> &'static str {
     }
 }
 
+/// write_script_file 以可执行权限写入脚本文件 / writes the script file with executable permissions.
 fn write_script_file(path: &Path, script: &str) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1152,6 +1188,7 @@ fn write_script_file(path: &Path, script: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// read_output_preview 读取 stdout/stderr 的内联预览片段 / reads an inline preview of stdout or stderr.
 fn read_output_preview(path: &Path, max_bytes: u64) -> AppResult<(String, bool)> {
     match File::open(path) {
         Ok(mut file) => {
@@ -1169,6 +1206,7 @@ fn read_output_preview(path: &Path, max_bytes: u64) -> AppResult<(String, bool)>
     }
 }
 
+/// write_json_file 将 JSON 结果落盘到目标路径 / writes a JSON result to the target path.
 fn write_json_file(path: &Path, value: &impl serde::Serialize) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1178,6 +1216,7 @@ fn write_json_file(path: &Path, value: &impl serde::Serialize) -> AppResult<()> 
     Ok(())
 }
 
+/// touch_file 确保输出文件存在 / ensures that an output file exists.
 fn touch_file(path: &Path) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1186,6 +1225,7 @@ fn touch_file(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// open_output_file 打开并截断 stdout/stderr 输出文件 / opens and truncates the stdout or stderr output file.
 fn open_output_file(path: &Path) -> AppResult<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1199,6 +1239,7 @@ fn open_output_file(path: &Path) -> AppResult<File> {
         .map_err(AppError::Io)
 }
 
+/// minimal_env 构造最小可运行环境并叠加任务自定义变量 / builds a minimal runnable environment and overlays task-specific variables.
 fn minimal_env(extra: &std::collections::HashMap<String, String>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for key in ["PATH", "HOME", "LANG", "TMPDIR", "USER"] {
@@ -1214,6 +1255,7 @@ fn minimal_env(extra: &std::collections::HashMap<String, String>) -> BTreeMap<St
     env
 }
 
+/// apply_resource_enforcement 在子进程 pre_exec 阶段应用 rlimit 约束 / applies rlimit enforcement during child pre_exec.
 fn apply_resource_enforcement(enforcement: &ResourceEnforcementPlan) -> nix::Result<()> {
     if enforcement.cpu_time_enforced {
         if let Some(cpu_time_sec) = enforcement.cpu_time_sec {
@@ -1236,6 +1278,7 @@ fn apply_resource_enforcement(enforcement: &ResourceEnforcementPlan) -> nix::Res
     Ok(())
 }
 
+/// apply_rlimits 是旧测试路径使用的直接 rlimit 应用函数 / is the direct rlimit helper kept for older test paths.
 #[allow(dead_code)]
 fn apply_rlimits(limits: &crate::types::ResourceLimits) -> nix::Result<()> {
     if let Some(cpu_time_sec) = limits.cpu_time_sec {
@@ -1255,6 +1298,7 @@ fn apply_rlimits(limits: &crate::types::ResourceLimits) -> nix::Result<()> {
     Ok(())
 }
 
+/// apply_linux_sandbox 在 Linux 上应用 namespace 和 chroot 隔离 / applies namespace and chroot isolation on Linux.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[cfg(target_os = "linux")]
 fn apply_linux_sandbox(
@@ -1294,6 +1338,7 @@ fn apply_linux_sandbox(
     Ok(())
 }
 
+/// apply_linux_sandbox 在非 Linux 主机上退化为空操作 / degrades to a no-op on non-Linux hosts.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[cfg(not(target_os = "linux"))]
 fn apply_linux_sandbox(
@@ -1303,6 +1348,7 @@ fn apply_linux_sandbox(
     Ok(())
 }
 
+/// setup_cgroup 为任务创建并配置 cgroup 目录 / creates and configures the cgroup directory for a task.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[cfg(target_os = "linux")]
 fn setup_cgroup(
@@ -1327,6 +1373,7 @@ fn setup_cgroup(
     Ok(dir)
 }
 
+/// setup_cgroup 在非 Linux 主机上返回不支持错误 / returns an unsupported error on non-Linux hosts.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[cfg(not(target_os = "linux"))]
 fn setup_cgroup(
@@ -1340,6 +1387,7 @@ fn setup_cgroup(
     ))
 }
 
+/// read_memory_peak_bytes 读取 cgroup 记录的内存峰值 / reads the memory peak recorded by the cgroup.
 fn read_memory_peak_bytes(_cgroup_dir: Option<&Path>) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -1354,6 +1402,7 @@ fn read_memory_peak_bytes(_cgroup_dir: Option<&Path>) -> Option<u64> {
     None
 }
 
+/// oom_killed 读取 cgroup memory.events 判断是否发生 OOM kill / checks cgroup memory.events to determine whether an OOM kill occurred.
 fn oom_killed(_cgroup_dir: Option<&Path>) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -1379,6 +1428,7 @@ fn oom_killed(_cgroup_dir: Option<&Path>) -> bool {
     false
 }
 
+/// wait_for_pid 使用 wait4 等待指定 PID 并收集资源使用数据 / waits for the given PID with wait4 and collects resource usage.
 fn wait_for_pid(pid: i32) -> AppResult<WaitUsage> {
     let mut status: libc::c_int = 0;
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -1419,22 +1469,26 @@ fn wait_for_pid(pid: i32) -> AppResult<WaitUsage> {
     })
 }
 
+/// timeval_to_ms 将 libc timeval 转成毫秒 / converts a libc timeval into milliseconds.
 fn timeval_to_ms(tv: libc::timeval) -> u64 {
     (tv.tv_sec.max(0) as u64)
         .saturating_mul(1000)
         .saturating_add((tv.tv_usec.max(0) as u64) / 1000)
 }
 
+/// convert_max_rss 将 Linux ru_maxrss 转为字节 / converts Linux ru_maxrss into bytes.
 #[cfg(target_os = "linux")]
 fn convert_max_rss(value: libc::c_long) -> u64 {
     (value.max(0) as u64).saturating_mul(1024)
 }
 
+/// convert_max_rss 在非 Linux 上直接返回 ru_maxrss 原值 / returns the raw ru_maxrss value on non-Linux hosts.
 #[cfg(not(target_os = "linux"))]
 fn convert_max_rss(value: libc::c_long) -> u64 {
     value.max(0) as u64
 }
 
+/// load_request 从文件或内联 JSON 读取提交请求 / loads a submit request from a file or inline JSON.
 fn load_request(args: &RemoteTaskArgs) -> AppResult<SubmitTaskRequest> {
     let raw = if let Some(file) = &args.file {
         fs::read_to_string(file)?
@@ -1444,14 +1498,17 @@ fn load_request(args: &RemoteTaskArgs) -> AppResult<SubmitTaskRequest> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// http_client 构造默认 HTTP client / builds the default HTTP client.
 fn http_client() -> Client {
     Client::builder().build().unwrap_or_else(|_| Client::new())
 }
 
+/// trim_server 去除 server 地址末尾斜杠 / trims trailing slashes from the server address.
 fn trim_server(server: &str) -> &str {
     server.trim_end_matches('/')
 }
 
+/// default_runtime_id 从主机名和监听地址生成默认 runtime_id / generates the default runtime_id from hostname and listen address.
 fn default_runtime_id(listen_addr: &str) -> String {
     let host = std::env::var("HOSTNAME")
         .ok()
@@ -1464,6 +1521,7 @@ fn default_runtime_id(listen_addr: &str) -> String {
     )
 }
 
+/// sanitize_runtime_id 将 runtime_id 候选值规范为安全字符集 / normalizes a runtime_id candidate into a safe character set.
 fn sanitize_runtime_id(value: &str) -> String {
     value
         .chars()
@@ -1477,6 +1535,7 @@ fn sanitize_runtime_id(value: &str) -> String {
         .collect()
 }
 
+/// print_json_response 打印 HTTP 响应体，并在非 2xx 时返回错误 / prints the HTTP response body and returns an error on non-2xx statuses.
 async fn print_json_response(response: reqwest::Response) -> AppResult<()> {
     let status = response.status();
     let body = response.text().await?;
@@ -1490,6 +1549,7 @@ async fn print_json_response(response: reqwest::Response) -> AppResult<()> {
     }
 }
 
+/// process_exists 通过空信号探测进程是否仍存在 / probes whether a process still exists via a null signal.
 fn process_exists(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -1497,10 +1557,12 @@ fn process_exists(pid: i32) -> bool {
     kill(Pid::from_raw(pid), None).is_ok()
 }
 
+/// nix_to_io 将 nix 错误转为 std::io::Error / converts a nix error into std::io::Error.
 fn nix_to_io(err: nix::Error) -> std::io::Error {
     std::io::Error::other(err.to_string())
 }
 
+/// init_tracing 初始化 JSON tracing 输出 / initializes JSON tracing output.
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

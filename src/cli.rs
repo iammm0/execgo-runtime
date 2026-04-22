@@ -4,6 +4,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 
 use crate::types::CapabilityMode;
 
+/// Cli 是 execgo-runtime 的顶层命令行入口 / is the top-level command-line entrypoint for execgo-runtime.
 #[derive(Debug, Parser)]
 #[command(name = "execgo-runtime", version, about = "ExecGo runtime data plane")]
 pub struct Cli {
@@ -11,6 +12,7 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Command 定义 runtime 支持的 CLI 子命令集合 / defines the CLI subcommands supported by the runtime.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Serve(ServeArgs),
@@ -23,6 +25,7 @@ pub enum Command {
     InternalShim(InternalShimArgs),
 }
 
+/// ServeArgs 描述启动 runtime server 所需的本地配置 / describes the local configuration required to start the runtime server.
 #[derive(Debug, Clone, Args)]
 pub struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:8080")]
@@ -65,6 +68,7 @@ pub struct ServeArgs {
     pub capacity_pids: Option<u64>,
 }
 
+/// RemoteTaskArgs 描述面向远端 runtime 的 submit/run 输入 / describes submit/run input for a remote runtime.
 #[derive(Debug, Clone, Args)]
 #[command(group(
     ArgGroup::new("input")
@@ -84,6 +88,7 @@ pub struct RemoteTaskArgs {
     pub timeout_ms: Option<u64>,
 }
 
+/// StatusArgs 描述面向远端 runtime 的单任务查询参数 / describes single-task query arguments for a remote runtime.
 #[derive(Debug, Clone, Args)]
 pub struct StatusArgs {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
@@ -91,6 +96,7 @@ pub struct StatusArgs {
     pub task_id: String,
 }
 
+/// WaitArgs 描述轮询远端任务终态所需参数 / describes the arguments needed to poll a remote task until terminal state.
 #[derive(Debug, Clone, Args)]
 pub struct WaitArgs {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
@@ -102,6 +108,7 @@ pub struct WaitArgs {
     pub poll_interval_ms: u64,
 }
 
+/// InternalShimArgs 描述内部 shim 子进程需要的最小上下文 / describes the minimum context required by the internal shim subprocess.
 #[derive(Debug, Clone, Args)]
 pub struct InternalShimArgs {
     #[arg(long)]
@@ -117,6 +124,7 @@ pub struct InternalShimArgs {
 }
 
 impl WaitArgs {
+    /// timeout 将可选毫秒超时转为 Duration / converts the optional millisecond timeout into a Duration.
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout_ms.map(Duration::from_millis)
     }

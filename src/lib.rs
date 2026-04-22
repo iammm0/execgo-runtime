@@ -1,3 +1,5 @@
+//! execgo-runtime crate 暴露数据面 runtime 的主要子模块 / exposes the main data-plane runtime modules for execgo-runtime.
+
 pub mod capabilities;
 pub mod cli;
 pub mod error;

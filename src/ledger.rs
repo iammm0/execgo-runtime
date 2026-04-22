@@ -3,20 +3,24 @@ use crate::{
     types::{ResourceCapacity, RuntimeResourcesResponse, TaskResourceReservation},
 };
 
+/// ResourceLedger 维护 runtime 的资源容量、预留和可用量计算 / maintains runtime capacity, reservations, and available-resource calculations.
 #[derive(Debug, Clone)]
 pub struct ResourceLedger {
     capacity: ResourceCapacity,
 }
 
 impl ResourceLedger {
+    /// new 使用给定容量创建资源账本 / creates a resource ledger from the given capacity snapshot.
     pub fn new(capacity: ResourceCapacity) -> Self {
         Self { capacity }
     }
 
+    /// capacity 返回账本的总容量快照 / returns the total capacity snapshot of the ledger.
     pub fn capacity(&self) -> &ResourceCapacity {
         &self.capacity
     }
 
+    /// ensure_within_capacity 校验单个任务请求本身不超过 runtime 总容量 / validates that one reservation request does not exceed total runtime capacity.
     pub fn ensure_within_capacity(&self, reservation: &TaskResourceReservation) -> AppResult<()> {
         if reservation.task_slots > self.capacity.task_slots {
             return Err(AppError::InsufficientResources(format!(
@@ -46,6 +50,7 @@ impl ResourceLedger {
         Ok(())
     }
 
+    /// can_reserve 判断当前已预留资源上再叠加一个任务是否仍可接受 / reports whether another reservation can be accepted on top of the currently reserved resources.
     pub fn can_reserve(
         &self,
         currently_reserved: &ResourceCapacity,
@@ -82,6 +87,7 @@ impl ResourceLedger {
         true
     }
 
+    /// reserved_capacity 根据活动预留列表聚合已占用容量 / aggregates the reserved capacity from active reservations.
     pub fn reserved_capacity<'a, I>(&self, reservations: I) -> ResourceCapacity
     where
         I: IntoIterator<Item = &'a TaskResourceReservation>,
@@ -117,6 +123,7 @@ impl ResourceLedger {
         }
     }
 
+    /// available_capacity 计算当前剩余可分配容量 / computes the currently available capacity.
     pub fn available_capacity(&self, reserved: &ResourceCapacity) -> ResourceCapacity {
         ResourceCapacity {
             task_slots: self.capacity.task_slots.saturating_sub(reserved.task_slots),
@@ -131,6 +138,7 @@ impl ResourceLedger {
         }
     }
 
+    /// empty_snapshot 构造没有活动预留时的资源视图 / builds a resource view with no active reservations.
     pub fn empty_snapshot(&self, runtime_id: String) -> RuntimeResourcesResponse {
         let reserved = self.reserved_capacity(std::iter::empty::<&TaskResourceReservation>());
         RuntimeResourcesResponse {
