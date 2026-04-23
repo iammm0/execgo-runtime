@@ -1,3 +1,6 @@
+//! Prometheus 指标渲染 / Prometheus metrics rendering.
+// Author: iammm0; Last edited: 2026-04-23
+
 use crate::repo::MetricsSnapshot;
 
 const BUCKETS_MS: &[u64] = &[100, 250, 500, 1_000, 5_000, 10_000, 30_000, 60_000, 300_000];

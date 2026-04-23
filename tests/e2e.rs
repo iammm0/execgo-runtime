@@ -1,3 +1,6 @@
+//! execgo-runtime 端到端测试：进程启动、HTTP API、CLI 流程 / execgo-runtime end-to-end tests: process bootstrap, HTTP API, and CLI flows.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::{
     net::TcpListener,
     path::Path,

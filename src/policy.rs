@@ -1,3 +1,6 @@
+//! 执行计划协商：将请求与 runtime 能力对齐 / Execution plan negotiation against runtime capabilities.
+// Author: iammm0; Last edited: 2026-04-23
+
 use crate::{
     error::{AppError, AppResult},
     types::{

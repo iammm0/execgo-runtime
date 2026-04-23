@@ -1,3 +1,6 @@
+//! SQLite 仓储：任务与事件的持久化读写 / SQLite repository: persistence for tasks and events.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};

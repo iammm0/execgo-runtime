@@ -1,3 +1,6 @@
+//! execgo-runtime 对外 API、持久化模型与策略类型 / Public API, persistence models, and policy types for execgo-runtime.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Component, Path, PathBuf},

@@ -1,3 +1,6 @@
+//! 资源账本：容量、预留与可用量计算 / Resource ledger: capacity, reservations, and availability computations.
+// Author: iammm0; Last edited: 2026-04-23
+
 use crate::{
     error::{AppError, AppResult},
     types::{ResourceCapacity, RuntimeResourcesResponse, TaskResourceReservation},

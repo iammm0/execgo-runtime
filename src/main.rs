@@ -1,3 +1,6 @@
+//! execgo-runtime 的二进制入口：解析 CLI 并委托给 runtime / execgo-runtime binary entrypoint: parse CLI and delegate into runtime.
+// Author: iammm0; Last edited: 2026-04-23
+
 use clap::Parser;
 use execgo_runtime::{cli::Cli, runtime};
 

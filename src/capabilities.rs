@@ -1,3 +1,6 @@
+//! 运行环境能力探测与快照构建 / Host capability probing and snapshot construction.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::{
     collections::BTreeMap,
     fs,

@@ -1,3 +1,6 @@
+//! 对外 HTTP API 路由组装（axum）/ External HTTP API router assembly (axum).
+// Author: iammm0; Last edited: 2026-04-23
+
 use axum::{
     extract::{Path, State},
     response::IntoResponse,

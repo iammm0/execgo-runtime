@@ -1,3 +1,6 @@
+//! execgo-runtime 的命令行参数与子命令定义 / CLI arguments and subcommand definitions for execgo-runtime.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::{path::PathBuf, time::Duration};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};

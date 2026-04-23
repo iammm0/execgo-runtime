@@ -1,3 +1,6 @@
+//! runtime 主流程：服务启动、任务提交/轮询、内部 shim 调度与资源控制 / runtime core: server start, task submit/poll, internal shim dispatch, and resource enforcement.
+// Author: iammm0; Last edited: 2026-04-23
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},

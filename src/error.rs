@@ -1,3 +1,6 @@
+//! 统一错误类型、HTTP 映射与错误信封 / Unified error types, HTTP mapping, and error envelopes.
+// Author: iammm0; Last edited: 2026-04-23
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
