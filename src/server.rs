@@ -3,6 +3,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -49,12 +50,18 @@ async fn get_task(
     Ok(Json(response))
 }
 
-/// kill_task 请求取消单个任务 / requests cancellation of a single task.
+/// kill_task 请求取消单个任务；从 x-execgo-owner 请求头读取调用者身份 / requests cancellation of a single task; reads caller identity from x-execgo-owner header.
 async fn kill_task(
     State(service): State<RuntimeService>,
     Path(task_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let response = service.kill_task(&task_id).await?;
+    let caller_owner = headers
+        .get("x-execgo-owner")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let response = service.kill_task(&task_id, caller_owner).await?;
     Ok(Json(response))
 }
 

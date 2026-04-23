@@ -410,3 +410,86 @@ async fn adaptive_plan_is_visible_and_strict_mode_rejects() {
     let strict_body = strict.json::<Value>().await.expect("strict error json");
     assert_eq!(strict_body["error"]["code"], "unsupported_capability");
 }
+
+/// tenant_quota_exceeded_returns_400 验证超出租户配额的提交请求以 400 被拒绝 / verifies that a submit exceeding a tenant quota is rejected with 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tenant_quota_exceeded_returns_400() {
+    // alice is given a soft quota of exactly 0 task_slots so any submission is rejected
+    let server = TestServer::start_with_args(&[
+        "--tenant-quota",
+        "alice=slots:0",
+        "--disable-linux-sandbox",
+        "--disable-cgroup",
+    ])
+    .await;
+
+    let resp = submit_task_raw(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "echo quota-test"]
+            },
+            "control_context": {
+                "tenant": "alice"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.json::<Value>().await.expect("error json");
+    assert_eq!(body["error"]["code"], "insufficient_resources");
+}
+
+/// owner_gated_kill_returns_403_for_wrong_owner 验证错误 owner 发起的 kill 请求以 403 被拒绝 / verifies that a kill with a wrong owner is rejected with 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_gated_kill_returns_403_for_wrong_owner() {
+    let server =
+        TestServer::start_with_args(&["--disable-linux-sandbox", "--disable-cgroup"]).await;
+
+    // submit a long-running task owned by "alice"
+    let submitted = submit_task(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "sleep 60"]
+            },
+            "control_context": {
+                "owner": "alice"
+            }
+        }),
+    )
+    .await;
+    let task_id = submitted["task_id"].as_str().expect("task id");
+
+    // wait until the task is at least accepted
+    for _ in 0..40 {
+        let s = get_status(&server, task_id).await;
+        if matches!(s["status"].as_str(), Some("accepted" | "running")) {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // kill with wrong owner => 403
+    let resp = Client::new()
+        .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
+        .header("x-execgo-owner", "bob")
+        .send()
+        .await
+        .expect("kill request");
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // kill with correct owner => 200
+    let resp_ok = Client::new()
+        .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
+        .header("x-execgo-owner", "alice")
+        .send()
+        .await
+        .expect("kill request ok");
+    assert_eq!(resp_ok.status(), reqwest::StatusCode::OK);
+}

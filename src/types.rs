@@ -189,6 +189,8 @@ pub struct ControlContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_profile: Option<String>,
     #[serde(default)]
     pub requires_strict_sandbox: bool,
@@ -214,6 +216,7 @@ impl ControlContext {
         for value in [
             self.control_plane_mode.as_deref(),
             self.tenant.as_deref(),
+            self.owner.as_deref(),
             self.expected_runtime_profile.as_deref(),
         ] {
             if value.is_some_and(|item| item.trim().is_empty()) {
@@ -723,6 +726,24 @@ pub struct ActiveTaskReservation {
     pub reserved_at: Option<DateTime<Utc>>,
 }
 
+/// TenantQuota 将租户名与其软上限容量关联 / associates a tenant name with its soft-limit capacity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TenantQuota {
+    pub tenant: String,
+    pub capacity: ResourceCapacity,
+}
+
+/// TenantResourceView 是单个租户的资源使用快照 / is the per-tenant resource usage snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TenantResourceView {
+    pub tenant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<ResourceCapacity>,
+    pub reserved: ResourceCapacity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<ResourceCapacity>,
+}
+
 /// RuntimeResourcesResponse 是 runtime 资源账本的外部视图 / is the external view of the runtime resource ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeResourcesResponse {
@@ -733,6 +754,8 @@ pub struct RuntimeResourcesResponse {
     #[serde(default)]
     pub active_reservations: Vec<ActiveTaskReservation>,
     pub accepted_waiting_tasks: u64,
+    #[serde(default)]
+    pub tenants: Vec<TenantResourceView>,
 }
 
 /// validate_task_id 校验 task_id 是否安全可用于路径和查询 / validates that task_id is safe for paths and lookups.

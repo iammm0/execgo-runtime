@@ -34,6 +34,8 @@ pub enum AppError {
     UnsupportedCapability(String),
     #[error("insufficient resources: {0}")]
     InsufficientResources(String),
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("sqlite error: {0}")]
@@ -58,6 +60,7 @@ impl AppError {
             AppError::SandboxSetup(_) => ErrorCode::SandboxSetupFailed,
             AppError::UnsupportedCapability(_) => ErrorCode::UnsupportedCapability,
             AppError::InsufficientResources(_) => ErrorCode::InsufficientResources,
+            AppError::PermissionDenied(_) => ErrorCode::Internal,
             AppError::Io(_) | AppError::Sqlite(_) | AppError::Json(_) | AppError::Http(_) => {
                 ErrorCode::Internal
             }
@@ -76,6 +79,7 @@ impl AppError {
             | AppError::SandboxSetup(_)
             | AppError::UnsupportedCapability(_)
             | AppError::InsufficientResources(_) => StatusCode::BAD_REQUEST,
+            AppError::PermissionDenied(_) => StatusCode::FORBIDDEN,
             AppError::Io(_)
             | AppError::Sqlite(_)
             | AppError::Json(_)

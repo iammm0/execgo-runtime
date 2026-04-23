@@ -69,6 +69,10 @@ pub struct ServeArgs {
     pub capacity_memory_bytes: Option<u64>,
     #[arg(long, env = "EXECGO_RUNTIME_CAPACITY_PIDS")]
     pub capacity_pids: Option<u64>,
+    /// Repeatable tenant quota, e.g. --tenant-quota alice=slots:4,memory:2147483648,pids:256
+    /// 可重复使用的租户配额参数 / Repeatable per-tenant soft quota specification.
+    #[arg(long = "tenant-quota", value_name = "SPEC", action = clap::ArgAction::Append)]
+    pub tenant_quota: Vec<String>,
 }
 
 /// RemoteTaskArgs 描述面向远端 runtime 的 submit/run 输入 / describes submit/run input for a remote runtime.

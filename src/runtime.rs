@@ -40,7 +40,7 @@ use crate::{
         ExecutionKind, ExecutionPlan, ResourceCapacity, ResourceEnforcementPlan, ResourceUsage,
         RuntimeCapabilities, RuntimeConfigResponse, RuntimeErrorInfo, RuntimeInfoResponse,
         RuntimeResourcesResponse, SubmitTaskRequest, SubmitTaskResponse, TaskArtifacts,
-        TaskResourceReservation, TaskStatus, TaskStatusResponse,
+        TaskResourceReservation, TaskStatus, TaskStatusResponse, TenantResourceView,
     },
 };
 
@@ -64,15 +64,23 @@ pub struct Settings {
     pub disable_cgroup: bool,
     pub capacity_memory_bytes: Option<u64>,
     pub capacity_pids: Option<u64>,
+    pub tenant_quotas: BTreeMap<String, ResourceCapacity>,
 }
 
 impl Settings {
     /// from_args 从 CLI 参数构造完整 runtime 配置 / builds the full runtime configuration from CLI arguments.
-    pub fn from_args(args: &ServeArgs) -> Self {
+    pub fn from_args(args: &ServeArgs) -> AppResult<Self> {
         let data_dir = args.data_dir.clone();
         let tasks_dir = data_dir.join("tasks");
         let database_path = data_dir.join("runtime.db");
-        Self {
+
+        let mut tenant_quotas: BTreeMap<String, ResourceCapacity> = BTreeMap::new();
+        for spec in &args.tenant_quota {
+            let (name, capacity) = parse_tenant_quota(spec)?;
+            tenant_quotas.insert(name, capacity);
+        }
+
+        Ok(Self {
             runtime_id: args
                 .runtime_id
                 .clone()
@@ -93,7 +101,8 @@ impl Settings {
             disable_cgroup: args.disable_cgroup,
             capacity_memory_bytes: args.capacity_memory_bytes,
             capacity_pids: args.capacity_pids,
-        }
+            tenant_quotas,
+        })
     }
 }
 
@@ -126,7 +135,10 @@ impl RuntimeService {
             capacity_memory_bytes: settings.capacity_memory_bytes,
             capacity_pids: settings.capacity_pids,
         });
-        let ledger = ResourceLedger::new(capabilities.resources.capacity.clone());
+        let ledger = ResourceLedger::with_tenant_quotas(
+            capabilities.resources.capacity.clone(),
+            settings.tenant_quotas.clone(),
+        );
         Ok(Self {
             settings: Arc::new(settings),
             repo,
@@ -159,6 +171,13 @@ impl RuntimeService {
         )?;
         let requested_reservation = TaskResourceReservation::from_limits(&request.limits);
         self.ledger.ensure_within_capacity(&requested_reservation)?;
+        self.ledger.ensure_within_tenant_quota(
+            request
+                .control_context
+                .as_ref()
+                .and_then(|c| c.tenant.as_deref()),
+            &requested_reservation,
+        )?;
 
         if self.repo.count_accepted()? >= self.settings.max_queued_tasks as u64 {
             return Err(AppError::QueueFull);
@@ -224,9 +243,30 @@ impl RuntimeService {
         self.repo.list_events(task_id)
     }
 
-    /// kill_task 取消任务，并在需要时向已有进程发送终止信号 / cancels a task and sends termination signals when a process already exists.
-    pub async fn kill_task(&self, task_id: &str) -> AppResult<TaskStatusResponse> {
+    /// kill_task 取消任务，并在需要时向已有进程发送终止信号；可选 caller_owner 用于所有权校验 / cancels a task and sends termination signals when a process already exists; optional caller_owner enforces ownership.
+    pub async fn kill_task(
+        &self,
+        task_id: &str,
+        caller_owner: Option<String>,
+    ) -> AppResult<TaskStatusResponse> {
         let task = self.repo.get_task(task_id)?;
+
+        // 所有权校验：若任务携带 owner，调用者必须匹配 / owner check: if the task has an owner, the caller must match
+        if let Some(task_owner) = task
+            .control_context
+            .as_ref()
+            .and_then(|c| c.owner.as_deref())
+        {
+            match caller_owner.as_deref() {
+                Some(caller) if caller == task_owner => {}
+                _ => {
+                    return Err(AppError::PermissionDenied(format!(
+                        "kill requires owner '{task_owner}'"
+                    )));
+                }
+            }
+        }
+
         if task.status.is_terminal() {
             return build_status_response(&task);
         }
@@ -312,14 +352,64 @@ impl RuntimeService {
         let reserved = self.ledger.reserved_capacity(reservations.iter());
         let available = self.ledger.available_capacity(&reserved);
         let active_reservations = active_tasks
-            .into_iter()
+            .iter()
             .filter_map(|task| {
-                task.reservation.map(|reservation| ActiveTaskReservation {
-                    task_id: task.task_id,
-                    status: task.status,
-                    reservation,
-                    reserved_at: task.reserved_at,
-                })
+                task.reservation
+                    .as_ref()
+                    .map(|reservation| ActiveTaskReservation {
+                        task_id: task.task_id.clone(),
+                        status: task.status.clone(),
+                        reservation: reservation.clone(),
+                        reserved_at: task.reserved_at,
+                    })
+            })
+            .collect();
+
+        // 按租户聚合已预留量 / aggregate reserved amounts per tenant
+        let mut per_tenant: BTreeMap<String, ResourceCapacity> = BTreeMap::new();
+        for task in &active_tasks {
+            if let (Some(reservation), Some(tenant)) = (
+                task.reservation.as_ref(),
+                task.control_context
+                    .as_ref()
+                    .and_then(|c| c.tenant.as_deref()),
+            ) {
+                let entry = per_tenant
+                    .entry(tenant.to_string())
+                    .or_insert(ResourceCapacity {
+                        task_slots: 0,
+                        memory_bytes: None,
+                        pids: None,
+                    });
+                add_reservation(entry, reservation);
+            }
+        }
+
+        // 确保所有已配置配额的租户都出现在响应中（即使使用量为零）/ ensure every configured-quota tenant appears even with zero usage
+        let quotas = self.ledger.tenant_quotas_snapshot();
+        for tenant in quotas.keys() {
+            per_tenant
+                .entry(tenant.clone())
+                .or_insert(ResourceCapacity {
+                    task_slots: 0,
+                    memory_bytes: None,
+                    pids: None,
+                });
+        }
+
+        let tenants: Vec<TenantResourceView> = per_tenant
+            .into_iter()
+            .map(|(tenant, tenant_reserved)| {
+                let quota = quotas.get(&tenant).cloned();
+                let available_opt = quota
+                    .as_ref()
+                    .map(|q| ResourceLedger::tenant_available_capacity(q, &tenant_reserved));
+                TenantResourceView {
+                    tenant,
+                    quota,
+                    reserved: tenant_reserved,
+                    available: available_opt,
+                }
             })
             .collect();
 
@@ -330,6 +420,7 @@ impl RuntimeService {
             available,
             active_reservations,
             accepted_waiting_tasks: self.repo.count_accepted_waiting()?,
+            tenants,
         })
     }
 
@@ -408,6 +499,35 @@ impl RuntimeService {
                 .iter()
                 .filter_map(|task| task.reservation.as_ref()),
         );
+
+        // 按租户聚合当前预留量 / aggregate currently reserved capacity per tenant
+        let mut tenant_reserved: BTreeMap<String, ResourceCapacity> = BTreeMap::new();
+        for task in &active_reservations {
+            if let (Some(reservation), Some(tenant)) = (
+                task.reservation.as_ref(),
+                task.control_context
+                    .as_ref()
+                    .and_then(|c| c.tenant.as_deref()),
+            ) {
+                let entry = tenant_reserved
+                    .entry(tenant.to_string())
+                    .or_insert(ResourceCapacity {
+                        task_slots: 0,
+                        memory_bytes: self
+                            .ledger
+                            .tenant_quota(tenant)
+                            .and_then(|q| q.memory_bytes)
+                            .map(|_| 0u64),
+                        pids: self
+                            .ledger
+                            .tenant_quota(tenant)
+                            .and_then(|q| q.pids)
+                            .map(|_| 0u64),
+                    });
+                add_reservation(entry, reservation);
+            }
+        }
+
         let tasks = self.repo.list_accepted(self.settings.max_queued_tasks)?;
         for task in tasks {
             if task.kill_requested {
@@ -435,9 +555,54 @@ impl RuntimeService {
                 continue;
             }
 
+            // 租户配额检查 / per-tenant quota check
+            let tenant = task
+                .control_context
+                .as_ref()
+                .and_then(|c| c.tenant.as_deref());
+            let empty_tenant_cap = ResourceCapacity {
+                task_slots: 0,
+                memory_bytes: self
+                    .ledger
+                    .tenant_quota(tenant.unwrap_or(""))
+                    .and_then(|q| q.memory_bytes)
+                    .map(|_| 0u64),
+                pids: self
+                    .ledger
+                    .tenant_quota(tenant.unwrap_or(""))
+                    .and_then(|q| q.pids)
+                    .map(|_| 0u64),
+            };
+            let tr = tenant
+                .and_then(|t| tenant_reserved.get(t))
+                .unwrap_or(&empty_tenant_cap);
+            if !self.ledger.can_reserve_for_tenant(tenant, tr, &reservation) {
+                continue;
+            }
+
             self.repo
                 .reserve_resources(&task.task_id, &reservation, "task resources reserved")?;
             add_reservation(&mut current_reserved, &reservation);
+
+            // 更新租户预留量 / update tenant reserved map
+            if let Some(t) = tenant {
+                let entry = tenant_reserved
+                    .entry(t.to_string())
+                    .or_insert(ResourceCapacity {
+                        task_slots: 0,
+                        memory_bytes: self
+                            .ledger
+                            .tenant_quota(t)
+                            .and_then(|q| q.memory_bytes)
+                            .map(|_| 0u64),
+                        pids: self
+                            .ledger
+                            .tenant_quota(t)
+                            .and_then(|q| q.pids)
+                            .map(|_| 0u64),
+                    });
+                add_reservation(entry, &reservation);
+            }
 
             let exe = std::env::current_exe()
                 .map_err(|err| AppError::LaunchFailed(format!("resolve current exe: {err}")))?;
@@ -549,7 +714,7 @@ pub async fn run(cli: Cli) -> AppResult<()> {
 
 /// run_server 启动 HTTP server 并挂载后台循环 / starts the HTTP server and attaches background loops.
 async fn run_server(args: ServeArgs) -> AppResult<()> {
-    let service = RuntimeService::new(Settings::from_args(&args)).await?;
+    let service = RuntimeService::new(Settings::from_args(&args)?).await?;
     service.recover().await?;
     service.start_background_loops();
 
@@ -1509,6 +1674,73 @@ fn http_client() -> Client {
 /// trim_server 去除 server 地址末尾斜杠 / trims trailing slashes from the server address.
 fn trim_server(server: &str) -> &str {
     server.trim_end_matches('/')
+}
+
+/// parse_tenant_quota 解析 "name=slots:N[,memory:BYTES][,pids:N]" 格式的租户配额规格 / parses a "name=slots:N[,memory:BYTES][,pids:N]" tenant quota specification.
+fn parse_tenant_quota(raw: &str) -> AppResult<(String, ResourceCapacity)> {
+    let (name_part, spec_part) = raw.split_once('=').ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "tenant-quota '{raw}': expected format name=slots:N[,memory:BYTES][,pids:N]"
+        ))
+    })?;
+    let name = name_part.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "tenant-quota: tenant name must not be empty".into(),
+        ));
+    }
+    let mut task_slots: Option<u64> = None;
+    let mut memory_bytes: Option<u64> = None;
+    let mut pids: Option<u64> = None;
+    for kv in spec_part.split(',') {
+        let kv = kv.trim();
+        if kv.is_empty() {
+            continue;
+        }
+        let (key, val) = kv.split_once(':').ok_or_else(|| {
+            AppError::InvalidInput(format!("tenant-quota '{raw}': malformed key-value '{kv}'"))
+        })?;
+        let val = val.trim();
+        match key.trim() {
+            "slots" => {
+                task_slots = Some(val.parse::<u64>().map_err(|_| {
+                    AppError::InvalidInput(format!(
+                        "tenant-quota '{raw}': slots value '{val}' is not a valid u64"
+                    ))
+                })?);
+            }
+            "memory" => {
+                memory_bytes = Some(val.parse::<u64>().map_err(|_| {
+                    AppError::InvalidInput(format!(
+                        "tenant-quota '{raw}': memory value '{val}' is not a valid u64"
+                    ))
+                })?);
+            }
+            "pids" => {
+                pids = Some(val.parse::<u64>().map_err(|_| {
+                    AppError::InvalidInput(format!(
+                        "tenant-quota '{raw}': pids value '{val}' is not a valid u64"
+                    ))
+                })?);
+            }
+            other => {
+                return Err(AppError::InvalidInput(format!(
+                    "tenant-quota '{raw}': unknown key '{other}'"
+                )));
+            }
+        }
+    }
+    let task_slots = task_slots.ok_or_else(|| {
+        AppError::InvalidInput(format!("tenant-quota '{raw}': 'slots' is required"))
+    })?;
+    Ok((
+        name,
+        ResourceCapacity {
+            task_slots,
+            memory_bytes,
+            pids,
+        },
+    ))
 }
 
 /// default_runtime_id 从主机名和监听地址生成默认 runtime_id / generates the default runtime_id from hostname and listen address.
