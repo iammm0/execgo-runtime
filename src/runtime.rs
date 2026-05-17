@@ -123,7 +123,7 @@ impl RuntimeService {
         let started_at = Utc::now();
         fs::create_dir_all(&settings.data_dir)?;
         fs::create_dir_all(&settings.tasks_dir)?;
-        let repo = Repository::new(settings.database_path.clone());
+        let repo = Repository::new(settings.database_path.clone())?;
         repo.init()?;
         let capabilities = probe_runtime_capabilities(&CapabilityProbeInput {
             runtime_id: settings.runtime_id.clone(),
@@ -157,6 +157,17 @@ impl RuntimeService {
         &self.repo
     }
 
+    async fn blocking_repo<F, T>(&self, f: F) -> AppResult<T>
+    where
+        F: FnOnce(&Repository) -> AppResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let repo = self.repo.clone();
+        tokio::task::spawn_blocking(move || f(&repo))
+            .await
+            .map_err(|e| AppError::Internal(format!("spawn_blocking join: {e}")))?
+    }
+
     pub fn capabilities(&self) -> Arc<RuntimeCapabilities> {
         self.capabilities.clone()
     }
@@ -179,7 +190,9 @@ impl RuntimeService {
             &requested_reservation,
         )?;
 
-        if self.repo.count_accepted()? >= self.settings.max_queued_tasks as u64 {
+        let max_queued = self.settings.max_queued_tasks as u64;
+        let count = self.blocking_repo(move |repo| repo.count_accepted()).await?;
+        if count >= max_queued {
             return Err(AppError::QueueFull);
         }
 
@@ -212,7 +225,7 @@ impl RuntimeService {
         touch_file(&stdout_path)?;
         touch_file(&stderr_path)?;
 
-        self.repo.insert_task(&crate::repo::NewTaskRecord {
+        let new_task = crate::repo::NewTaskRecord {
             task_id: task_id.clone(),
             request,
             task_dir,
@@ -224,7 +237,8 @@ impl RuntimeService {
             script_path,
             execution_plan,
             control_context,
-        })?;
+        };
+        self.blocking_repo(move |repo| repo.insert_task(&new_task)).await?;
         self.dispatcher_notify.notify_one();
 
         Ok(SubmitTaskResponse {
@@ -235,12 +249,14 @@ impl RuntimeService {
     }
 
     pub async fn get_task_status(&self, task_id: &str) -> AppResult<TaskStatusResponse> {
-        let task = self.repo.get_task(task_id)?;
+        let id = task_id.to_string();
+        let task = self.blocking_repo(move |repo| repo.get_task(&id)).await?;
         build_status_response(&task)
     }
 
     pub async fn get_events(&self, task_id: &str) -> AppResult<Vec<EventRecord>> {
-        self.repo.list_events(task_id)
+        let id = task_id.to_string();
+        self.blocking_repo(move |repo| repo.list_events(&id)).await
     }
 
     /// kill_task 取消任务，并在需要时向已有进程发送终止信号；可选 caller_owner 用于所有权校验 / cancels a task and sends termination signals when a process already exists; optional caller_owner enforces ownership.
@@ -249,7 +265,11 @@ impl RuntimeService {
         task_id: &str,
         caller_owner: Option<String>,
     ) -> AppResult<TaskStatusResponse> {
-        let task = self.repo.get_task(task_id)?;
+        let id = task_id.to_string();
+        let task = self.blocking_repo({
+            let id = id.clone();
+            move |repo| repo.get_task(&id)
+        }).await?;
 
         // 所有权校验：若任务携带 owner，调用者必须匹配 / owner check: if the task has an owner, the caller must match
         if let Some(task_owner) = task
@@ -271,32 +291,37 @@ impl RuntimeService {
             return build_status_response(&task);
         }
 
-        let updated = self.repo.set_cancel_requested(task_id)?;
+        let updated = self.blocking_repo({
+            let id = id.clone();
+            move |repo| repo.set_cancel_requested(&id)
+        }).await?;
         if updated.status == TaskStatus::Accepted {
-            self.repo.cancel_accepted_task(
-                task_id,
-                RuntimeErrorInfo {
-                    code: ErrorCode::Cancelled,
-                    message: "task cancelled before execution".into(),
-                    details: None,
-                },
-            )?;
+            self.blocking_repo({
+                let id = id.clone();
+                move |repo| repo.cancel_accepted_task(
+                    &id,
+                    RuntimeErrorInfo {
+                        code: ErrorCode::Cancelled,
+                        message: "task cancelled before execution".into(),
+                        details: None,
+                    },
+                )
+            }).await?;
         } else {
             signal_task_termination(&updated, Signal::SIGTERM)?;
-            self.spawn_escalation(task_id.to_string(), updated.pgid);
+            self.spawn_escalation(id.clone(), updated.pgid);
         }
         self.dispatcher_notify.notify_one();
         self.get_task_status(task_id).await
     }
 
     pub async fn ready(&self) -> AppResult<()> {
-        self.repo.init()?;
-        Ok(())
+        self.blocking_repo(|repo| repo.init()).await
     }
 
     /// metrics 渲染 Prometheus 指标输出 / renders Prometheus metrics output.
     pub async fn metrics(&self) -> impl IntoResponse {
-        match self.repo.metrics_snapshot() {
+        match self.blocking_repo(|repo| repo.metrics_snapshot()).await {
             Ok(snapshot) => (
                 StatusCode::OK,
                 [("content-type", "text/plain; version=0.0.4")],
@@ -344,7 +369,7 @@ impl RuntimeService {
     }
 
     pub async fn runtime_resources(&self) -> AppResult<RuntimeResourcesResponse> {
-        let active_tasks = self.repo.list_active_reservations()?;
+        let active_tasks = self.blocking_repo(|repo| repo.list_active_reservations()).await?;
         let reservations: Vec<TaskResourceReservation> = active_tasks
             .iter()
             .filter_map(|task| task.reservation.clone())
@@ -419,7 +444,7 @@ impl RuntimeService {
             reserved,
             available,
             active_reservations,
-            accepted_waiting_tasks: self.repo.count_accepted_waiting()?,
+            accepted_waiting_tasks: self.blocking_repo(|repo| repo.count_accepted_waiting()).await?,
             tenants,
         })
     }
@@ -439,41 +464,48 @@ impl RuntimeService {
 
     /// recover 在服务启动时恢复未终态任务与资源预留 / recovers non-terminal tasks and reservations during service startup.
     pub async fn recover(&self) -> AppResult<()> {
-        for task in self.repo.list_non_terminal()? {
-            match task.status {
-                TaskStatus::Accepted => {
-                    if task.has_active_reservation() {
-                        self.repo.release_resources(
-                            &task.task_id,
-                            "orphan accepted-task reservation released during recovery",
-                        )?;
-                    }
-                }
-                TaskStatus::Running => {
-                    if let Some(shim_pid) = task.shim_pid {
-                        if process_exists(shim_pid as i32) {
-                            if !task.has_active_reservation() {
-                                let reservation =
-                                    TaskResourceReservation::from_limits(&task.limits);
-                                self.repo.reserve_resources(
-                                    &task.task_id,
-                                    &reservation,
-                                    "resource reservation reconstructed during recovery",
-                                )?;
-                            }
-                            self.repo.mark_recovered(&task.task_id)?;
-                        } else {
-                            self.repo.mark_recovery_lost(&task.task_id)?;
-                            persist_latest_result(&self.repo, &task.task_id)?;
+        let repo = self.repo.clone();
+        tokio::task::spawn_blocking(move || {
+            for task in repo.list_non_terminal()? {
+                match task.status {
+                    TaskStatus::Accepted => {
+                        if task.has_active_reservation() {
+                            repo.release_resources(
+                                &task.task_id,
+                                "orphan accepted-task reservation released during recovery",
+                            )?;
                         }
-                    } else {
-                        self.repo.mark_recovery_lost(&task.task_id)?;
-                        persist_latest_result(&self.repo, &task.task_id)?;
                     }
+                    TaskStatus::Running => {
+                        if let Some(shim_pid) = task.shim_pid {
+                            if process_exists(shim_pid as i32) {
+                                if !task.has_active_reservation() {
+                                    let reservation =
+                                        TaskResourceReservation::from_limits(&task.limits);
+                                    repo.reserve_resources(
+                                        &task.task_id,
+                                        &reservation,
+                                        "resource reservation reconstructed during recovery",
+                                    )?;
+                                }
+                                repo.mark_recovered(&task.task_id)?;
+                            } else {
+                                repo.mark_recovery_lost(&task.task_id)?;
+                                persist_latest_result(&repo, &task.task_id)?;
+                            }
+                        } else {
+                            repo.mark_recovery_lost(&task.task_id)?;
+                            persist_latest_result(&repo, &task.task_id)?;
+                        }
+                    }
+                    TaskStatus::Success | TaskStatus::Failed | TaskStatus::Cancelled => {}
                 }
-                TaskStatus::Success | TaskStatus::Failed | TaskStatus::Cancelled => {}
             }
-        }
+            Ok::<(), AppError>(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking join: {e}")))?
+        ?;
         self.dispatcher_notify.notify_one();
         Ok(())
     }
@@ -493,6 +525,13 @@ impl RuntimeService {
 
     /// dispatch_once 执行一次调度周期，预留资源并启动内部 shim / executes one dispatch cycle by reserving resources and starting the internal shim.
     async fn dispatch_once(&self) -> AppResult<()> {
+        let svc = self.clone();
+        tokio::task::spawn_blocking(move || svc.dispatch_once_sync())
+            .await
+            .map_err(|e| AppError::Internal(format!("spawn_blocking join: {e}")))?
+    }
+
+    fn dispatch_once_sync(&self) -> AppResult<()> {
         let active_reservations = self.repo.list_active_reservations()?;
         let mut current_reserved = self.ledger.reserved_capacity(
             active_reservations
@@ -656,26 +695,30 @@ impl RuntimeService {
     async fn gc_loop(&self) {
         loop {
             sleep(self.settings.gc_interval).await;
-            let cutoff = match chrono::Duration::from_std(self.settings.result_retention) {
-                Ok(duration) => Utc::now() - duration,
-                Err(_) => Utc::now(),
-            };
-            match self.repo.list_gc_candidates(cutoff) {
-                Ok(tasks) => {
-                    for task in tasks {
-                        if let Err(err) = fs::remove_dir_all(&task.task_dir) {
-                            if err.kind() != std::io::ErrorKind::NotFound {
-                                warn!(task_id = %task.task_id, error = %err, "failed to remove task directory during gc");
-                                continue;
+            let svc = self.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let cutoff = match chrono::Duration::from_std(svc.settings.result_retention) {
+                    Ok(duration) => Utc::now() - duration,
+                    Err(_) => Utc::now(),
+                };
+                match svc.repo.list_gc_candidates(cutoff) {
+                    Ok(tasks) => {
+                        for task in tasks {
+                            if let Err(err) = fs::remove_dir_all(&task.task_dir) {
+                                if err.kind() != std::io::ErrorKind::NotFound {
+                                    warn!(task_id = %task.task_id, error = %err, "failed to remove task directory during gc");
+                                    continue;
+                                }
+                            }
+                            if let Err(err) = svc.repo.delete_task(&task.task_id) {
+                                warn!(task_id = %task.task_id, error = %err, "failed to delete task row during gc");
                             }
                         }
-                        if let Err(err) = self.repo.delete_task(&task.task_id) {
-                            warn!(task_id = %task.task_id, error = %err, "failed to delete task row during gc");
-                        }
                     }
+                    Err(err) => warn!(error = %err, "gc iteration failed"),
                 }
-                Err(err) => warn!(error = %err, "gc iteration failed"),
-            }
+            })
+            .await;
         }
     }
 
@@ -685,15 +728,18 @@ impl RuntimeService {
         let grace = self.settings.termination_grace;
         tokio::spawn(async move {
             sleep(grace).await;
-            if let Ok(task) = repo.get_task(&task_id) {
-                if task.status == TaskStatus::Running {
-                    if let Some(pgid) = pgid.or(task.pgid) {
-                        let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
-                    } else if let Some(pid) = task.pid {
-                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(task) = repo.get_task(&task_id) {
+                    if task.status == TaskStatus::Running {
+                        if let Some(pgid) = pgid.or(task.pgid) {
+                            let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+                        } else if let Some(pid) = task.pid {
+                            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        }
                     }
                 }
-            }
+            })
+            .await;
         });
     }
 }
@@ -823,7 +869,7 @@ async fn run_remote(args: RemoteTaskArgs) -> AppResult<()> {
 
 /// run_internal_shim 在子进程中拉起真实工作负载并等待完成 / launches the actual workload in a subprocess and waits for completion inside the shim.
 async fn run_internal_shim(args: InternalShimArgs) -> AppResult<()> {
-    let repo = Repository::new(args.database.clone());
+    let repo = Repository::new(args.database.clone())?;
     repo.init()?;
     let mut task = repo.get_task(&args.task_id)?;
     if task.status.is_terminal() {
