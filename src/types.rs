@@ -50,6 +50,9 @@ pub enum ErrorCode {
     ExitNonZero,
     UnsupportedCapability,
     InsufficientResources,
+    NotFound,
+    Conflict,
+    PermissionDenied,
     Internal,
 }
 

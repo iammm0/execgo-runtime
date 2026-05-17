@@ -53,14 +53,14 @@ impl AppError {
     pub fn code(&self) -> ErrorCode {
         match self {
             AppError::InvalidInput(_) => ErrorCode::InvalidInput,
-            AppError::NotFound(_) => ErrorCode::Internal,
+            AppError::NotFound(_) => ErrorCode::NotFound,
             AppError::QueueFull => ErrorCode::ResourceLimitExceeded,
-            AppError::Conflict(_) => ErrorCode::Internal,
+            AppError::Conflict(_) => ErrorCode::Conflict,
             AppError::LaunchFailed(_) => ErrorCode::LaunchFailed,
             AppError::SandboxSetup(_) => ErrorCode::SandboxSetupFailed,
             AppError::UnsupportedCapability(_) => ErrorCode::UnsupportedCapability,
             AppError::InsufficientResources(_) => ErrorCode::InsufficientResources,
-            AppError::PermissionDenied(_) => ErrorCode::Internal,
+            AppError::PermissionDenied(_) => ErrorCode::PermissionDenied,
             AppError::Io(_) | AppError::Sqlite(_) | AppError::Json(_) | AppError::Http(_) => {
                 ErrorCode::Internal
             }

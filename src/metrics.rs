@@ -43,15 +43,9 @@ pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
     out.push_str("# TYPE execgo_runtime_task_duration_ms histogram\n");
     let mut sorted = snapshot.finished_durations_ms.clone();
     sorted.sort_unstable();
-    let mut sum = 0u64;
-    for duration in &sorted {
-        sum = sum.saturating_add(*duration);
-    }
+    let sum: u64 = sorted.iter().copied().fold(0u64, u64::saturating_add);
     for bucket in BUCKETS_MS {
-        let count = sorted
-            .iter()
-            .filter(|duration| **duration <= *bucket)
-            .count() as u64;
+        let count = sorted.partition_point(|d| *d <= *bucket) as u64;
         out.push_str(&format!(
             "execgo_runtime_task_duration_ms_bucket{{le=\"{}\"}} {}\n",
             bucket, count

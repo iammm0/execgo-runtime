@@ -2,6 +2,7 @@
 // Author: iammm0; Last edited: 2026-04-23
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -22,6 +23,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Repository {
     db_path: PathBuf,
+    conn: Arc<Mutex<Connection>>,
 }
 
 /// TaskRecord 是单个任务在数据库中的完整持久化镜像 / is the full persisted database image of a single task.
@@ -113,10 +115,13 @@ impl TaskRecord {
 
 impl Repository {
     /// new 创建指向指定 SQLite 文件的仓储实例 / creates a repository bound to the given SQLite database file.
-    pub fn new(db_path: impl Into<PathBuf>) -> Self {
-        Self {
-            db_path: db_path.into(),
-        }
+    pub fn new(db_path: impl Into<PathBuf>) -> AppResult<Self> {
+        let db_path = db_path.into();
+        let conn = Self::open_connection(&db_path)?;
+        Ok(Self {
+            db_path,
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn db_path(&self) -> &Path {
@@ -128,7 +133,7 @@ impl Repository {
         if let Some(parent) = self.db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -201,7 +206,7 @@ impl Repository {
     /// insert_task 在单个事务内插入任务主记录和初始事件 / inserts the task row and initial events in a single transaction.
     pub fn insert_task(&self, new_task: &NewTaskRecord) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             r#"
@@ -290,7 +295,7 @@ impl Repository {
 
     /// get_task 按 task_id 读取完整任务记录 / loads the full task record by task_id.
     pub fn get_task(&self, task_id: &str) -> AppResult<TaskRecord> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let task = conn
             .query_row(
                 "SELECT * FROM tasks WHERE task_id = ?1",
@@ -303,7 +308,7 @@ impl Repository {
 
     /// list_events 返回任务的持久化事件流 / returns the persisted event stream of a task.
     pub fn list_events(&self, task_id: &str) -> AppResult<Vec<EventRecord>> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT seq, task_id, event_type, timestamp_ms, message, data_json FROM task_events WHERE task_id = ?1 ORDER BY seq ASC",
         )?;
@@ -334,7 +339,7 @@ impl Repository {
 
     /// count_by_status 统计指定状态的任务数量 / counts tasks in the given status.
     pub fn count_by_status(&self, status: TaskStatus) -> AppResult<u64> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tasks WHERE status = ?1",
             params![encode_status(status)],
@@ -345,7 +350,7 @@ impl Repository {
 
     /// list_accepted 按创建时间返回待调度任务 / returns accepted tasks ordered by creation time for dispatch.
     pub fn list_accepted(&self, limit: usize) -> AppResult<Vec<TaskRecord>> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status = 'accepted' ORDER BY created_at_ms ASC LIMIT ?1",
         )?;
@@ -359,7 +364,7 @@ impl Repository {
 
     /// list_non_terminal 返回恢复流程需要关注的未终态任务 / returns non-terminal tasks that recovery logic must inspect.
     pub fn list_non_terminal(&self) -> AppResult<Vec<TaskRecord>> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status IN ('accepted', 'running') ORDER BY created_at_ms ASC",
         )?;
@@ -373,7 +378,7 @@ impl Repository {
 
     /// list_active_reservations 返回当前仍占用资源账本额度的任务 / returns tasks that still hold resource ledger reservations.
     pub fn list_active_reservations(&self) -> AppResult<Vec<TaskRecord>> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE reservation_json IS NOT NULL AND released_at_ms IS NULL ORDER BY reserved_at_ms ASC, created_at_ms ASC",
         )?;
@@ -387,7 +392,7 @@ impl Repository {
 
     /// count_accepted_waiting 统计还未拿到资源预留的 accepted 任务 / counts accepted tasks that are still waiting for a reservation.
     pub fn count_accepted_waiting(&self) -> AppResult<u64> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tasks WHERE status = 'accepted' AND (reservation_json IS NULL OR released_at_ms IS NOT NULL)",
             [],
@@ -399,7 +404,7 @@ impl Repository {
     /// mark_dispatched 标记任务已被 shim 接管调度 / marks a task as dispatched to the shim process.
     pub fn mark_dispatched(&self, task_id: &str, shim_pid: u32) -> AppResult<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE tasks SET status = 'running', shim_pid = ?2, updated_at_ms = ?3 WHERE task_id = ?1 AND status = 'accepted'",
             params![task_id, i64::from(shim_pid), now],
@@ -416,7 +421,7 @@ impl Repository {
         script_path: Option<&Path>,
     ) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET status = 'running', pid = ?2, pgid = ?3, started_at_ms = ?4, updated_at_ms = ?4, script_path = COALESCE(?5, script_path) WHERE task_id = ?1",
@@ -441,7 +446,7 @@ impl Repository {
         message: &str,
     ) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET reservation_json = ?2, reserved_at_ms = ?3, released_at_ms = NULL, updated_at_ms = ?3 WHERE task_id = ?1",
@@ -465,7 +470,7 @@ impl Repository {
     /// release_resources 释放任务资源预留并写入事件 / releases the task reservation and emits an event.
     pub fn release_resources(&self, task_id: &str, message: &str) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         let reservation_json: Option<String> = tx
             .query_row(
@@ -496,7 +501,7 @@ impl Repository {
     /// set_cancel_requested 标记任务收到取消请求 / marks that the task has received a cancellation request.
     pub fn set_cancel_requested(&self, task_id: &str) -> AppResult<TaskRecord> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET kill_requested = 1, kill_requested_at_ms = ?2, updated_at_ms = ?2 WHERE task_id = ?1",
@@ -516,7 +521,7 @@ impl Repository {
     /// mark_timeout_triggered 记录任务已命中 wall time 超时 / records that the task has hit the wall-time timeout.
     pub fn mark_timeout_triggered(&self, task_id: &str) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET timeout_triggered = 1, updated_at_ms = ?2 WHERE task_id = ?1",
@@ -536,7 +541,7 @@ impl Repository {
     /// cancel_accepted_task 将尚未启动的 accepted 任务直接转为 cancelled / converts an accepted-but-not-started task directly into cancelled.
     pub fn cancel_accepted_task(&self, task_id: &str, error: RuntimeErrorInfo) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         let active_reservation_json: Option<String> = tx
             .query_row(
@@ -599,7 +604,7 @@ impl Repository {
 
     /// complete_task 写入终态、错误、资源使用和释放事件 / writes terminal state, error details, resource usage, and release events.
     pub fn complete_task(&self, task_id: &str, update: &CompletionUpdate) -> AppResult<()> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         let active_reservation_json: Option<String> = tx
             .query_row(
@@ -679,7 +684,7 @@ impl Repository {
     /// mark_recovered 记录运行中任务在恢复流程中被重新接管 / records that a running task was successfully reattached during recovery.
     pub fn mark_recovered(&self, task_id: &str) -> AppResult<()> {
         let now = Utc::now();
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET updated_at_ms = ?2 WHERE task_id = ?1 AND status = 'running'",
@@ -717,7 +722,7 @@ impl Repository {
 
     /// is_cancel_requested 查询任务是否收到取消信号 / checks whether cancellation has been requested for the task.
     pub fn is_cancel_requested(&self, task_id: &str) -> AppResult<bool> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let flag: i64 = conn.query_row(
             "SELECT kill_requested FROM tasks WHERE task_id = ?1",
             params![task_id],
@@ -728,7 +733,7 @@ impl Repository {
 
     /// list_gc_candidates 列出超过保留期、可被回收的终态任务 / lists terminal tasks that exceeded retention and can be garbage-collected.
     pub fn list_gc_candidates(&self, finished_before: DateTime<Utc>) -> AppResult<Vec<TaskRecord>> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status IN ('success', 'failed', 'cancelled') AND finished_at_ms IS NOT NULL AND finished_at_ms <= ?1 ORDER BY finished_at_ms ASC",
         )?;
@@ -745,14 +750,14 @@ impl Repository {
 
     /// delete_task 删除任务主记录及其级联事件 / deletes the task row and its cascaded events.
     pub fn delete_task(&self, task_id: &str) -> AppResult<()> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         conn.execute("DELETE FROM tasks WHERE task_id = ?1", params![task_id])?;
         Ok(())
     }
 
     /// metrics_snapshot 聚合状态、错误码和时长指标 / aggregates status, error-code, and duration metrics.
     pub fn metrics_snapshot(&self) -> AppResult<MetricsSnapshot> {
-        let conn = self.connect()?;
+        let conn = self.conn()?;
         let mut snapshot = MetricsSnapshot::default();
 
         let mut status_stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
@@ -785,13 +790,16 @@ impl Repository {
         Ok(snapshot)
     }
 
-    /// connect 打开 SQLite 连接并配置基础 pragma / opens a SQLite connection and configures baseline pragmas.
-    fn connect(&self) -> AppResult<Connection> {
-        let conn = Connection::open(&self.db_path)?;
+    fn open_connection(db_path: &Path) -> AppResult<Connection> {
+        let conn = Connection::open(db_path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Ok(conn)
+    }
+
+    fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|_| AppError::Internal("repository mutex poisoned".into()))
     }
 }
 
@@ -976,6 +984,9 @@ fn encode_error_code(code: ErrorCode) -> &'static str {
         ErrorCode::ExitNonZero => "exit_nonzero",
         ErrorCode::UnsupportedCapability => "unsupported_capability",
         ErrorCode::InsufficientResources => "insufficient_resources",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::PermissionDenied => "permission_denied",
         ErrorCode::Internal => "internal",
     }
 }
@@ -994,6 +1005,9 @@ fn decode_error_code(value: &str) -> rusqlite::Result<ErrorCode> {
         "exit_nonzero" => Ok(ErrorCode::ExitNonZero),
         "unsupported_capability" => Ok(ErrorCode::UnsupportedCapability),
         "insufficient_resources" => Ok(ErrorCode::InsufficientResources),
+        "not_found" => Ok(ErrorCode::NotFound),
+        "conflict" => Ok(ErrorCode::Conflict),
+        "permission_denied" => Ok(ErrorCode::PermissionDenied),
         "internal" => Ok(ErrorCode::Internal),
         other => Err(rusqlite::Error::InvalidColumnType(
             0,

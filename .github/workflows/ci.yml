@@ -37,3 +37,18 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
+  msrv:
+    name: MSRV check (1.74)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.74
+        uses: dtolnay/rust-toolchain@1.74
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --all-targets
