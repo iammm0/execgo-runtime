@@ -515,6 +515,7 @@ impl Repository {
             None,
         )?;
         tx.commit()?;
+        drop(conn);
         self.get_task(task_id)
     }
 
@@ -799,7 +800,9 @@ impl Repository {
     }
 
     fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|_| AppError::Internal("repository mutex poisoned".into()))
+        self.conn
+            .lock()
+            .map_err(|_| AppError::Internal("repository mutex poisoned".into()))
     }
 }
 

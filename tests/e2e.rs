@@ -11,7 +11,7 @@ use std::{
 use reqwest::Client;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 /// find_free_port 申请一个临时可用端口供测试 runtime 使用 / acquires a temporary free port for the test runtime.
 fn find_free_port() -> u16 {
@@ -88,6 +88,28 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// command_output_with_timeout runs a CLI command with a hard test timeout so regressions fail fast.
+async fn command_output_with_timeout(
+    mut command: Command,
+    timeout_duration: Duration,
+    label: &str,
+) -> std::process::Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect(label);
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait().expect(label).is_some() {
+            return child.wait_with_output().expect(label);
+        }
+        if started.elapsed() >= timeout_duration {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{label} timed out after {timeout_duration:?}");
+        }
+        sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -226,14 +248,15 @@ async fn cli_run_and_kill_flow_work() {
         }
     });
 
-    let submit_output = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"))
+    let mut submit_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    submit_command
         .arg("submit")
         .arg("--server")
         .arg(&server.base_url)
         .arg("--json")
-        .arg(payload.to_string())
-        .output()
-        .expect("cli submit");
+        .arg(payload.to_string());
+    let submit_output =
+        command_output_with_timeout(submit_command, Duration::from_secs(5), "cli submit").await;
     assert!(submit_output.status.success());
     let submitted: Value =
         serde_json::from_slice(&submit_output.stdout).expect("submit stdout json");
@@ -247,19 +270,21 @@ async fn cli_run_and_kill_flow_work() {
         sleep(Duration::from_millis(100)).await;
     }
 
-    let kill_output = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"))
+    let mut kill_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    kill_command
         .arg("kill")
         .arg("--server")
         .arg(&server.base_url)
-        .arg(task_id)
-        .output()
-        .expect("cli kill");
+        .arg(task_id);
+    let kill_output =
+        command_output_with_timeout(kill_command, Duration::from_secs(5), "cli kill").await;
     assert!(kill_output.status.success());
 
     let terminal = wait_terminal(&server, task_id).await;
     assert_eq!(terminal["status"], "cancelled");
 
-    let run_output = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"))
+    let mut run_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    run_command
         .arg("run")
         .arg("--server")
         .arg(&server.base_url)
@@ -273,9 +298,9 @@ async fn cli_run_and_kill_flow_work() {
                 }
             })
             .to_string(),
-        )
-        .output()
-        .expect("cli run");
+        );
+    let run_output =
+        command_output_with_timeout(run_command, Duration::from_secs(5), "cli run").await;
     assert!(run_output.status.success());
     let run_status: Value = serde_json::from_slice(&run_output.stdout).expect("run stdout json");
     assert_eq!(run_status["status"], "success");
@@ -476,20 +501,28 @@ async fn owner_gated_kill_returns_403_for_wrong_owner() {
     }
 
     // kill with wrong owner => 403
-    let resp = Client::new()
-        .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
-        .header("x-execgo-owner", "bob")
-        .send()
-        .await
-        .expect("kill request");
+    let resp = timeout(
+        Duration::from_secs(3),
+        Client::new()
+            .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
+            .header("x-execgo-owner", "bob")
+            .send(),
+    )
+    .await
+    .expect("wrong-owner kill request timed out")
+    .expect("kill request");
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
 
     // kill with correct owner => 200
-    let resp_ok = Client::new()
-        .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
-        .header("x-execgo-owner", "alice")
-        .send()
-        .await
-        .expect("kill request ok");
+    let resp_ok = timeout(
+        Duration::from_secs(3),
+        Client::new()
+            .post(format!("{}/api/v1/tasks/{task_id}/kill", server.base_url))
+            .header("x-execgo-owner", "alice")
+            .send(),
+    )
+    .await
+    .expect("right-owner kill request timed out")
+    .expect("kill request ok");
     assert_eq!(resp_ok.status(), reqwest::StatusCode::OK);
 }
