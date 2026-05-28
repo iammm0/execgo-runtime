@@ -6,6 +6,8 @@
 
 ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交、调度、执行与持久化，对外提供 **HTTP API** 与 **CLI**，可作为 ExecGo 控制面背后的执行后端。
 
+它面向的核心场景是为通用或成熟 Agent 提供可靠执行底座：Claude Code、Codex、Hermes Agent、OpenClaw 等上层 agent 继续负责规划与工具选择，ExecGo 控制面负责任务治理，`execgo-runtime` 负责把进程级真实执行落盘、隔离、取消、审计和恢复。
+
 **当前版本**：`1.0.0-b1`（预发布，行为与 API 仍可能调整；详见 [版本与标签](docs/deployment.md#版本与标签)）。
 
 ---
@@ -30,6 +32,8 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 ## 简介
 
 `execgo-runtime` 在单进程中托管 HTTP 服务，通过 SQLite（WAL）与任务目录持久化状态；调度器将队列中的任务派发到 **internal shim** 子进程执行用户命令或脚本。runtime 采用“单一版本、多能力面”的设计：启动时探测宿主环境，暴露 capability manifest，并在任务提交时解析 requested/effective execution plan。支持健康检查、就绪探针、Prometheus 指标、任务取消与超时控制、本机资源账本，以及 Linux 上可选的 `linux_sandbox` 与 cgroup 能力（详见 [架构说明](docs/architecture.md)）。
+
+在 Agent 接入链路中，runtime 不理解自然语言，也不替代 Agent 的决策循环。它只接收明确的执行请求，并提供稳定的任务 ID、状态机、stdout/stderr、result、事件与资源/沙箱审计信息，让上层 Agent 可以把执行结果继续用于后续推理或回放。
 
 ## 功能特性
 
@@ -171,6 +175,13 @@ EXECGO_RUNTIME_URL=http://127.0.0.1:8080
 ```
 
 指向正在运行的 `execgo-runtime` 根地址；控制面通过该 URL 调用上述 API。
+
+推荐链路：
+
+1. 通用 Agent 通过 ExecGo adapter 提交结构化 action。
+2. ExecGo 将需要进程执行、资源限制或沙箱策略的 action 翻译为 `type=runtime` 任务。
+3. `execgo-runtime` 执行任务并持久化 request/result/stdout/stderr。
+4. ExecGo 将状态与结果归一化返回给 Agent，用于继续推理、重试、取消或审计。
 
 ## 文档
 

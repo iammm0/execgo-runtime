@@ -2,6 +2,8 @@
 
 本目录包含 `execgo-runtime` 的设计说明、API 与运维资料。建议按下列顺序阅读。
 
+`execgo-runtime` 的定位是 ExecGo 可靠执行层的数据面：当 Claude Code、Codex、Hermes Agent、OpenClaw 等通用或成熟 Agent 通过 ExecGo 提交真实执行动作时，runtime 负责进程执行、状态持久化、取消、资源/沙箱策略与 artifact 审计。
+
 当前 runtime 已演进为“单一版本、多能力面”的自适应数据面运行时：启动时探测宿主环境，暴露 capability manifest，并通过 execution plan 与 ResourceLedger 显式体现 requested/effective 能力与资源留出。
 
 ## 目录
