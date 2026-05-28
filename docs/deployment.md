@@ -61,19 +61,19 @@ docker run --rm -p 8080:8080 -v execgo-data:/data execgo-runtime:local
 
 - **CI**（`.github/workflows/ci.yml`）：在 push / PR 上执行 `fmt`、`clippy`、`test`。
 - **Container image**（`.github/workflows/container.yml`）：在 `main` / `master` 或版本标签 push 后构建 Docker 镜像并推送到 `ghcr.io/iammm0/execgo-runtime`。
-- **Release 构建**（`.github/workflows/release.yml`）：在推送以数字开头的版本标签（如 `1.0.0-b1`）时构建 Linux/macOS  release 二进制并上传 Artifact（预发布/验证用）。
+- **Release 构建**（`.github/workflows/release.yml`）：在推送以数字开头的版本标签（如 `1.1.0`）时构建 Linux/macOS release 二进制并上传 Artifact。
 
 流水线定义以仓库内 YAML 为准。
 
 GHCR 标签策略：
 
 - 默认分支构建：`latest`、`main`（或对应分支名）、`sha-<commit>`。
-- 版本标签构建：原始 Git 标签（如 `1.0.0-b1`）和 `sha-<commit>`。
+- 版本标签构建：原始 Git 标签（如 `1.1.0`）和 `sha-<commit>`。
 
 ## 版本与标签
 
 - **Cargo 版本**：与 `Cargo.toml` 中 `version` 一致，`/healthz` 中 `version` 字段来自该值。
-- **Git 标签**：发布节点可打标签（如 `1.0.0-b1`），便于对照源码与二进制产物。
+- **Git 标签**：发布节点可打标签（如 `1.1.0`），便于对照源码与二进制产物。
 
 预发布版本（`-b1`、`-beta` 等）表示 API 与行为仍可能调整；升级前请阅读变更说明。
 

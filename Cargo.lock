@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "execgo-runtime"
-version = "1.0.0-b1"
+version = "1.1.0"
 dependencies = [
  "axum",
  "chrono",

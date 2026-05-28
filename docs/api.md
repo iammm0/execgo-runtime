@@ -190,7 +190,7 @@
 存活探测。
 
 ```json
-{ "status": "ok", "version": "1.0.0-b1" }
+{ "status": "ok", "version": "1.1.0" }
 ```
 
 `version` 来自构建时的 `CARGO_PKG_VERSION`。
@@ -202,7 +202,7 @@
 就绪探测：会尝试初始化/连接数据库。
 
 ```json
-{ "status": "ready", "version": "1.0.0-b1" }
+{ "status": "ready", "version": "1.1.0" }
 ```
 
 ---

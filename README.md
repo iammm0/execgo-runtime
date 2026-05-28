@@ -8,7 +8,7 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 
 它面向的核心场景是为通用或成熟 Agent 提供可靠执行底座：Claude Code、Codex、Hermes Agent、OpenClaw 等上层 agent 继续负责规划与工具选择，ExecGo 控制面负责任务治理，`execgo-runtime` 负责把进程级真实执行落盘、隔离、取消、审计和恢复。
 
-**当前版本**：`1.0.0-b1`（预发布，行为与 API 仍可能调整；详见 [版本与标签](docs/deployment.md#版本与标签)）。
+**当前版本**：`1.1.0`（详见 [版本与标签](docs/deployment.md#版本与标签)）。
 
 ---
 
@@ -59,7 +59,7 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 ### 从 crates.io 安装
 
 ```bash
-cargo install execgo-runtime --version 1.0.0-b1
+cargo install execgo-runtime --version 1.1.0
 ```
 
 ### 从源码构建（推荐）
