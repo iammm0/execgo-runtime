@@ -22,7 +22,7 @@ pub enum Command {
     Submit(RemoteTaskArgs),
     Status(StatusArgs),
     Wait(WaitArgs),
-    Kill(StatusArgs),
+    Kill(KillArgs),
     Run(RemoteTaskArgs),
     #[command(hide = true, name = "internal-shim")]
     InternalShim(InternalShimArgs),
@@ -100,6 +100,16 @@ pub struct RemoteTaskArgs {
 pub struct StatusArgs {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: String,
+    pub task_id: String,
+}
+
+/// KillArgs 描述面向远端 runtime 的取消请求参数 / describes arguments for a remote runtime kill request.
+#[derive(Debug, Clone, Args)]
+pub struct KillArgs {
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    pub server: String,
+    #[arg(long, env = "EXECGO_RUNTIME_OWNER")]
+    pub owner: Option<String>,
     pub task_id: String,
 }
 

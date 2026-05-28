@@ -28,7 +28,9 @@ use nix::unistd::{chdir, chroot};
 
 use crate::{
     capabilities::{probe_runtime_capabilities, CapabilityProbeInput},
-    cli::{Cli, Command, InternalShimArgs, RemoteTaskArgs, ServeArgs, StatusArgs, WaitArgs},
+    cli::{
+        Cli, Command, InternalShimArgs, KillArgs, RemoteTaskArgs, ServeArgs, StatusArgs, WaitArgs,
+    },
     error::{AppError, AppResult},
     ledger::ResourceLedger,
     metrics::render_prometheus,
@@ -191,7 +193,9 @@ impl RuntimeService {
         )?;
 
         let max_queued = self.settings.max_queued_tasks as u64;
-        let count = self.blocking_repo(move |repo| repo.count_accepted()).await?;
+        let count = self
+            .blocking_repo(move |repo| repo.count_accepted())
+            .await?;
         if count >= max_queued {
             return Err(AppError::QueueFull);
         }
@@ -238,7 +242,8 @@ impl RuntimeService {
             execution_plan,
             control_context,
         };
-        self.blocking_repo(move |repo| repo.insert_task(&new_task)).await?;
+        self.blocking_repo(move |repo| repo.insert_task(&new_task))
+            .await?;
         self.dispatcher_notify.notify_one();
 
         Ok(SubmitTaskResponse {
@@ -266,10 +271,12 @@ impl RuntimeService {
         caller_owner: Option<String>,
     ) -> AppResult<TaskStatusResponse> {
         let id = task_id.to_string();
-        let task = self.blocking_repo({
-            let id = id.clone();
-            move |repo| repo.get_task(&id)
-        }).await?;
+        let task = self
+            .blocking_repo({
+                let id = id.clone();
+                move |repo| repo.get_task(&id)
+            })
+            .await?;
 
         // 所有权校验：若任务携带 owner，调用者必须匹配 / owner check: if the task has an owner, the caller must match
         if let Some(task_owner) = task
@@ -291,22 +298,27 @@ impl RuntimeService {
             return build_status_response(&task);
         }
 
-        let updated = self.blocking_repo({
-            let id = id.clone();
-            move |repo| repo.set_cancel_requested(&id)
-        }).await?;
+        let updated = self
+            .blocking_repo({
+                let id = id.clone();
+                move |repo| repo.set_cancel_requested(&id)
+            })
+            .await?;
         if updated.status == TaskStatus::Accepted {
             self.blocking_repo({
                 let id = id.clone();
-                move |repo| repo.cancel_accepted_task(
-                    &id,
-                    RuntimeErrorInfo {
-                        code: ErrorCode::Cancelled,
-                        message: "task cancelled before execution".into(),
-                        details: None,
-                    },
-                )
-            }).await?;
+                move |repo| {
+                    repo.cancel_accepted_task(
+                        &id,
+                        RuntimeErrorInfo {
+                            code: ErrorCode::Cancelled,
+                            message: "task cancelled before execution".into(),
+                            details: None,
+                        },
+                    )
+                }
+            })
+            .await?;
         } else {
             signal_task_termination(&updated, Signal::SIGTERM)?;
             self.spawn_escalation(id.clone(), updated.pgid);
@@ -369,7 +381,9 @@ impl RuntimeService {
     }
 
     pub async fn runtime_resources(&self) -> AppResult<RuntimeResourcesResponse> {
-        let active_tasks = self.blocking_repo(|repo| repo.list_active_reservations()).await?;
+        let active_tasks = self
+            .blocking_repo(|repo| repo.list_active_reservations())
+            .await?;
         let reservations: Vec<TaskResourceReservation> = active_tasks
             .iter()
             .filter_map(|task| task.reservation.clone())
@@ -444,7 +458,9 @@ impl RuntimeService {
             reserved,
             available,
             active_reservations,
-            accepted_waiting_tasks: self.blocking_repo(|repo| repo.count_accepted_waiting()).await?,
+            accepted_waiting_tasks: self
+                .blocking_repo(|repo| repo.count_accepted_waiting())
+                .await?,
             tenants,
         })
     }
@@ -504,8 +520,7 @@ impl RuntimeService {
             Ok::<(), AppError>(())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("spawn_blocking join: {e}")))?
-        ?;
+        .map_err(|e| AppError::Internal(format!("spawn_blocking join: {e}")))??;
         self.dispatcher_notify.notify_one();
         Ok(())
     }
@@ -800,16 +815,22 @@ async fn status_remote(args: StatusArgs) -> AppResult<()> {
 }
 
 /// kill_remote 调用远程 runtime 的 kill API / calls the remote runtime kill API.
-async fn kill_remote(args: StatusArgs) -> AppResult<()> {
+async fn kill_remote(args: KillArgs) -> AppResult<()> {
     let client = http_client();
-    let response = client
-        .post(format!(
-            "{}/api/v1/tasks/{}/kill",
-            trim_server(&args.server),
-            args.task_id
-        ))
-        .send()
-        .await?;
+    let mut request = client.post(format!(
+        "{}/api/v1/tasks/{}/kill",
+        trim_server(&args.server),
+        args.task_id
+    ));
+    if let Some(owner) = args
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        request = request.header("x-execgo-owner", owner);
+    }
+    let response = request.send().await?;
     print_json_response(response).await
 }
 

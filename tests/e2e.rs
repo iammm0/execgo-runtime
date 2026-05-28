@@ -526,3 +526,94 @@ async fn owner_gated_kill_returns_403_for_wrong_owner() {
     .expect("kill request ok");
     assert_eq!(resp_ok.status(), reqwest::StatusCode::OK);
 }
+
+/// cli_kill_supports_owner 验证 CLI kill 可通过 --owner 或 EXECGO_RUNTIME_OWNER 取消 owner-gated 任务 / verifies CLI kill can cancel owner-gated tasks via --owner or EXECGO_RUNTIME_OWNER.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_kill_supports_owner() {
+    let server =
+        TestServer::start_with_args(&["--disable-linux-sandbox", "--disable-cgroup"]).await;
+
+    let wrong_owner_task = submit_task(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "sleep 60"]
+            },
+            "control_context": {
+                "owner": "alice"
+            }
+        }),
+    )
+    .await;
+    let wrong_owner_task_id = wrong_owner_task["task_id"].as_str().expect("task id");
+
+    let mut wrong_owner_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    wrong_owner_command
+        .arg("kill")
+        .arg("--server")
+        .arg(&server.base_url)
+        .arg("--owner")
+        .arg("bob")
+        .arg(wrong_owner_task_id);
+    let wrong_owner_output = command_output_with_timeout(
+        wrong_owner_command,
+        Duration::from_secs(5),
+        "cli wrong-owner kill",
+    )
+    .await;
+    assert!(!wrong_owner_output.status.success());
+    let wrong_owner_status = get_status(&server, wrong_owner_task_id).await;
+    assert_ne!(wrong_owner_status["status"], "cancelled");
+
+    let mut correct_owner_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    correct_owner_command
+        .arg("kill")
+        .arg("--server")
+        .arg(&server.base_url)
+        .arg("--owner")
+        .arg("alice")
+        .arg(wrong_owner_task_id);
+    let correct_owner_output = command_output_with_timeout(
+        correct_owner_command,
+        Duration::from_secs(5),
+        "cli owner kill",
+    )
+    .await;
+    assert!(correct_owner_output.status.success());
+    let terminal = wait_terminal(&server, wrong_owner_task_id).await;
+    assert_eq!(terminal["status"], "cancelled");
+
+    let env_owner_task = submit_task(
+        &server,
+        json!({
+            "execution": {
+                "kind": "command",
+                "program": "/bin/sh",
+                "args": ["-c", "sleep 60"]
+            },
+            "control_context": {
+                "owner": "carol"
+            }
+        }),
+    )
+    .await;
+    let env_owner_task_id = env_owner_task["task_id"].as_str().expect("task id");
+    let mut env_owner_command = Command::new(env!("CARGO_BIN_EXE_execgo-runtime"));
+    env_owner_command
+        .arg("kill")
+        .arg("--server")
+        .arg(&server.base_url)
+        .arg(env_owner_task_id)
+        .env("EXECGO_RUNTIME_OWNER", "carol");
+    let env_owner_output = command_output_with_timeout(
+        env_owner_command,
+        Duration::from_secs(5),
+        "cli env owner kill",
+    )
+    .await;
+    assert!(env_owner_output.status.success());
+    let terminal = wait_terminal(&server, env_owner_task_id).await;
+    assert_eq!(terminal["status"], "cancelled");
+}
