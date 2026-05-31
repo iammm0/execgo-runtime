@@ -29,9 +29,26 @@
 | 404 | 任务不存在 |
 | 409 | 冲突（如 `task_id` 已存在） |
 | 429 | 队列已满（`max_queued_tasks`） |
+| 403 | 权限不足（如 owner-gated kill 的 owner 不匹配） |
 | 500 | 内部错误 |
 
 ---
+
+## API 总览
+
+| 方法 | 路径 | 主要用途 | 典型调用方 |
+|------|------|----------|------------|
+| `POST` | `/api/v1/tasks` | 提交命令或脚本任务，返回 `task_id`。 | ExecGo 控制面、adapter、CLI |
+| `GET` | `/api/v1/tasks/:id` | 查询状态、stdout/stderr 摘要、usage、execution plan、artifact 路径。 | 控制面轮询、UI、排障脚本 |
+| `POST` | `/api/v1/tasks/:id/kill` | 请求取消任务。可用 `x-execgo-owner` 做 owner 校验。 | 控制面取消、CLI |
+| `GET` | `/api/v1/tasks/:id/events` | 读取任务事件流。 | 审计、调试、观测 |
+| `GET` | `/api/v1/runtime/info` | runtime 基础身份与版本。 | 控制面发现 |
+| `GET` | `/api/v1/runtime/capabilities` | 宿主能力与降级告警。 | 调度策略、部署校验 |
+| `GET` | `/api/v1/runtime/config` | 非敏感运行配置。 | 运维核查 |
+| `GET` | `/api/v1/runtime/resources` | 总容量、活动 reservation、租户配额视图。 | 调度、容量面板 |
+| `GET` | `/healthz` | 存活探针。 | 编排系统 |
+| `GET` | `/readyz` | 就绪探针，校验存储。 | 编排系统 |
+| `GET` | `/metrics` | Prometheus 文本指标。 | 监控系统 |
 
 ## POST `/api/v1/tasks`
 
@@ -94,11 +111,14 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `control_plane_mode` | string | 上层 ExecGo 运行模式描述。 |
-| `tenant` | string | 可选租户标识；当前 runtime 不做租户配额。 |
+| `tenant` | string | 可选租户标识；参与已配置的租户软配额和 resources API 聚合。 |
+| `owner` | string | 可选所有者标识；若设置，`kill` 时调用者必须提供匹配 owner。 |
 | `expected_runtime_profile` | string | 上层期望的 runtime profile。 |
 | `requires_strict_sandbox` | bool | 若为 true，runtime 会把 sandbox 能力降级视为 strict 拒绝。 |
 | `requires_resource_reservation` | bool | 记录上层是否要求资源 reservation；本版本 ResourceLedger 始终启用。 |
 | `labels` | object | 字符串标签。 |
+
+`tenant` 与 `owner` 的定位不同：`tenant` 参与 ResourceLedger 租户软配额和 resources API 聚合；`owner` 只用于取消时的防误杀校验。它们都不是认证凭据，生产环境仍应由网关或控制面负责认证授权。
 
 ### 响应：`SubmitTaskResponse`
 
@@ -107,6 +127,26 @@
 | `task_id` | 任务 ID。 |
 | `handle_id` | 当前实现与 `task_id` 相同。 |
 | `status` | 初始为 `accepted`。 |
+
+### 提交流程与拒绝条件
+
+`POST /api/v1/tasks` 成功返回只表示任务已持久化并进入队列，不表示进程已经启动。提交阶段会同步完成：
+
+1. 校验 `task_id`、`execution`、`limits`、`sandbox`、`policy`、`control_context`。
+2. 解析 `execution_plan`，决定 requested/effective sandbox 和资源 enforcement。
+3. 校验单任务 reservation 是否超过 runtime 总容量或租户软配额。
+4. 检查队列长度是否超过 `--max-queued-tasks`。
+5. 写入 SQLite、`request.json`、stdout/stderr 空日志文件，并通知 dispatcher。
+
+常见拒绝：
+
+| 错误码 | 场景 |
+|--------|------|
+| `invalid_input` | command 缺少 `program`、script 缺少 `script`、非法 workspace 子目录、空 control context 值等。 |
+| `unsupported_capability` | `strict` 策略或 `requires_strict_sandbox=true` 下请求了当前宿主不可满足的 sandbox/resource 能力。 |
+| `insufficient_resources` | 单任务 `limits.memory_bytes` / `pids_max` / `task_slots` 超过 runtime 总容量或租户配额。 |
+| `resource_limit_exceeded` | 队列已满。 |
+| `conflict` | 自定义 `task_id` 已存在。 |
 
 ---
 
@@ -133,9 +173,42 @@
 
 ## POST `/api/v1/tasks/:id/kill`
 
-请求取消任务。若任务尚未执行则直接取消；若已运行则发送 SIGTERM 并可能在 grace 后 SIGKILL。
+请求取消任务。请求体为空。
 
-响应体同 `GET` 任务状态。
+若任务尚未执行则直接取消；若已运行则发送 SIGTERM，并可能在 `--termination-grace-ms` 后升级 SIGKILL。响应体同 `GET` 任务状态。
+
+### Owner 校验
+
+如果提交时设置了：
+
+```json
+{
+  "control_context": {
+    "owner": "alice"
+  }
+}
+```
+
+取消时必须带匹配 header：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks/<task_id>/kill" \
+  -H "x-execgo-owner: alice"
+```
+
+缺失或不匹配时返回 HTTP 403：
+
+```json
+{
+  "error": {
+    "code": "permission_denied",
+    "message": "kill requires owner 'alice'",
+    "details": null
+  }
+}
+```
+
+如果任务没有 `control_context.owner`，该接口保持兼容，不要求 header。
 
 ---
 
@@ -182,6 +255,30 @@
 - `reserved` / `available`：当前 reservation 与剩余 capacity。
 - `active_reservations`：仍未释放的任务 reservation 列表。
 - `accepted_waiting_tasks`：仍处于 accepted 且未持有活动 reservation 的任务数量。
+- `tenants`：按 `control_context.tenant` 聚合的租户视图；配置了 `--tenant-quota` 的租户即使当前使用量为 0 也会出现。
+
+租户视图示例：
+
+```json
+{
+  "tenant": "alice",
+  "quota": {
+    "task_slots": 2,
+    "memory_bytes": 2147483648,
+    "pids": 256
+  },
+  "reserved": {
+    "task_slots": 1,
+    "memory_bytes": 536870912,
+    "pids": 32
+  },
+  "available": {
+    "task_slots": 1,
+    "memory_bytes": 1610612736,
+    "pids": 224
+  }
+}
+```
 
 ---
 
@@ -227,4 +324,105 @@ curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks" \
 
 ```bash
 curl -sS "http://127.0.0.1:8080/api/v1/tasks/<task_id>"
+```
+
+**脚本任务：**
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "script-demo",
+    "execution": {
+      "kind": "script",
+      "script": "import os\nprint(os.environ.get(\"GREETING\", \"hi\"))",
+      "interpreter": ["python3"],
+      "env": {
+        "GREETING": "hello from runtime"
+      }
+    },
+    "limits": {
+      "wall_time_ms": 30000,
+      "memory_bytes": 536870912,
+      "stdout_max_bytes": 65536,
+      "stderr_max_bytes": 65536
+    },
+    "sandbox": {
+      "profile": "process",
+      "workspace_subdir": "demo"
+    },
+    "metadata": {
+      "kind": "docs-example"
+    }
+  }'
+```
+
+**请求 Linux sandbox，且要求 strict：**
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "execution": {
+      "kind": "command",
+      "program": "/bin/sh",
+      "args": ["-c", "id && pwd"]
+    },
+    "sandbox": {
+      "profile": "linux_sandbox",
+      "namespaces": {
+        "mount": true,
+        "pid": true,
+        "uts": true,
+        "ipc": true,
+        "net": false
+      }
+    },
+    "policy": {
+      "capability_mode": "strict"
+    }
+  }'
+```
+
+如果宿主不是 Linux，或 sandbox/cgroup 被禁用，该请求会返回 `unsupported_capability`。若把 `capability_mode` 改为 `adaptive`，runtime 会尝试降级到可执行策略，并在状态响应的 `execution_plan.degraded` 与 `fallback_reasons` 中说明。
+
+**带租户和 owner 的长任务：**
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "execution": {
+      "kind": "command",
+      "program": "/bin/sh",
+      "args": ["-c", "sleep 60"]
+    },
+    "limits": {
+      "wall_time_ms": 120000,
+      "memory_bytes": 268435456,
+      "pids_max": 32
+    },
+    "control_context": {
+      "tenant": "alice",
+      "owner": "alice",
+      "control_plane_mode": "execgo",
+      "labels": {
+        "workflow": "demo"
+      }
+    }
+  }'
+```
+
+随后取消：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/tasks/<task_id>/kill" \
+  -H "x-execgo-owner: alice"
+```
+
+**查看能力与资源：**
+
+```bash
+curl -sS "http://127.0.0.1:8080/api/v1/runtime/capabilities"
+curl -sS "http://127.0.0.1:8080/api/v1/runtime/resources"
 ```

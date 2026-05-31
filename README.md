@@ -35,6 +35,22 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 
 在 Agent 接入链路中，runtime 不理解自然语言，也不替代 Agent 的决策循环。它只接收明确的执行请求，并提供稳定的任务 ID、状态机、stdout/stderr、result、事件与资源/沙箱审计信息，让上层 Agent 可以把执行结果继续用于后续推理或回放。
 
+一条任务的关键链路如下：
+
+```text
+POST /api/v1/tasks
+  -> validate request
+  -> resolve execution_plan
+  -> write SQLite + tasks/<id>/request.json
+  -> ResourceLedger reservation
+  -> fork internal-shim
+  -> run command/script
+  -> write result.json + stdout.log + stderr.log
+  -> GET status/events/metrics
+```
+
+这意味着 runtime 的边界非常明确：HTTP 服务负责接收、调度、恢复和观测，internal shim 负责真实进程执行；上层 ExecGo/Agent 负责规划、重试策略和业务语义。
+
 ## 功能特性
 
 | 能力 | 说明 |
@@ -45,6 +61,7 @@ ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交
 | 调度与恢复 | shim 子进程执行；重启后可对非终态任务做恢复相关处理 |
 | 自适应能力 | 环境探测、capability API、显式降级、requested/effective execution plan |
 | 资源与沙箱 | 默认进程级；Linux 可选 `linux_sandbox`（命名空间、cgroup 等）；本机 ResourceLedger 做 reservation/release |
+| 治理语义 | `control_context.tenant` 支持租户软配额聚合；`control_context.owner` 支持 owner-gated kill |
 
 ## 环境要求
 
@@ -112,6 +129,54 @@ cargo run -- serve --listen-addr 127.0.0.1:8080 --data-dir ./data
 cargo run -- submit --json '{"execution":{"kind":"command","program":"/bin/sh","args":["-c","echo hello"]}}'
 ```
 
+### 提交带治理信息的任务
+
+```bash
+cargo run -- run --json '{
+  "execution": {
+    "kind": "command",
+    "program": "/bin/sh",
+    "args": ["-c", "echo $GREETING && sleep 1"],
+    "env": {
+      "GREETING": "hello from execgo-runtime"
+    }
+  },
+  "limits": {
+    "wall_time_ms": 30000,
+    "memory_bytes": 536870912,
+    "pids_max": 32,
+    "stdout_max_bytes": 65536,
+    "stderr_max_bytes": 65536
+  },
+  "sandbox": {
+    "profile": "process",
+    "workspace_subdir": "quickstart"
+  },
+  "control_context": {
+    "tenant": "demo",
+    "owner": "local-user",
+    "control_plane_mode": "manual"
+  },
+  "metadata": {
+    "purpose": "quickstart"
+  }
+}'
+```
+
+运行结束后可查看：
+
+```bash
+curl -sS http://127.0.0.1:8080/api/v1/runtime/resources
+curl -sS http://127.0.0.1:8080/api/v1/tasks/<task_id>/events
+ls -la ./data/tasks/<task_id>
+```
+
+如果任务带 `control_context.owner`，取消时需要传入匹配 owner：
+
+```bash
+cargo run -- kill --owner local-user <task_id>
+```
+
 ### 一键演示
 
 ```bash
@@ -145,8 +210,20 @@ chmod +x scripts/quickstart.sh
 | `EXECGO_RUNTIME_DISABLE_LINUX_SANDBOX` | 可选：禁用 Linux sandbox 探测能力 |
 | `EXECGO_RUNTIME_DISABLE_CGROUP` | 可选：禁用 cgroup 能力 |
 | `EXECGO_RUNTIME_CAPACITY_MEMORY_BYTES` / `EXECGO_RUNTIME_CAPACITY_PIDS` | 可选：覆盖 ResourceLedger 容量探测 |
+| `EXECGO_RUNTIME_OWNER` | 可选：CLI `kill` 默认 owner header |
 
 服务端常用参数见 [CLI 文档](docs/cli.md)（并发上限、队列长度、GC、grace 时间等）。
+
+租户软配额通过 `serve --tenant-quota` 配置，例如：
+
+```bash
+cargo run -- serve \
+  --listen-addr 127.0.0.1:8080 \
+  --data-dir ./data \
+  --tenant-quota demo=slots:2,memory:1073741824,pids:128
+```
+
+配额只在任务设置了匹配的 `control_context.tenant` 时生效。
 
 ## HTTP API 概览
 
