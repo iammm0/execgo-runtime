@@ -4,38 +4,38 @@
 [![Rust](https://img.shields.io/badge/rust-1.74%2B-orange.svg)](https://www.rust-lang.org/)
 [![Crates.io](https://img.shields.io/crates/v/execgo-runtime.svg)](https://crates.io/crates/execgo-runtime)
 
-ExecGo 生态中的**数据面运行时**：用 Rust 实现任务的异步提交、调度、执行与持久化，对外提供 **HTTP API** 与 **CLI**，可作为 ExecGo 控制面背后的执行后端。
+**Adaptive data-plane runtime** for the ExecGo ecosystem: a Rust service for asynchronous task submission, scheduling, execution, and persistence, with an **HTTP API**, **CLI**, capability negotiation, and a local resource ledger. It acts as the execution backend behind the ExecGo control plane.
 
-它面向的核心场景是为通用或成熟 Agent 提供可靠执行底座：Claude Code、Codex、Hermes Agent、OpenClaw 等上层 agent 继续负责规划与工具选择，ExecGo 控制面负责任务治理，`execgo-runtime` 负责把进程级真实执行落盘、隔离、取消、审计和恢复。
+The primary use case is a reliable execution substrate for general-purpose or mature agents. Upper-layer agents such as Claude Code, Codex, Hermes Agent, and OpenClaw keep planning and tool selection; the ExecGo control plane handles task governance; `execgo-runtime` handles process-level execution with persistence, isolation, cancellation, audit trails, and recovery.
 
-**当前版本**：`1.1.0`（详见 [版本与标签](docs/deployment.md#版本与标签)）。
-
----
-
-## 目录
-
-- [简介](#简介)
-- [功能特性](#功能特性)
-- [环境要求](#环境要求)
-- [安装](#安装)
-- [快速开始](#快速开始)
-- [配置与环境变量](#配置与环境变量)
-- [HTTP API 概览](#http-api-概览)
-- [与 ExecGo 集成](#与-execgo-集成)
-- [文档](#文档)
-- [参与贡献](#参与贡献)
-- [安全](#安全)
-- [许可证](#许可证)
+**Current version**: `1.1.0` (see [Versioning & tags](docs/deployment.md)).
 
 ---
 
-## 简介
+## Table of contents
 
-`execgo-runtime` 在单进程中托管 HTTP 服务，通过 SQLite（WAL）与任务目录持久化状态；调度器将队列中的任务派发到 **internal shim** 子进程执行用户命令或脚本。runtime 采用“单一版本、多能力面”的设计：启动时探测宿主环境，暴露 capability manifest，并在任务提交时解析 requested/effective execution plan。支持健康检查、就绪探针、Prometheus 指标、任务取消与超时控制、本机资源账本，以及 Linux 上可选的 `linux_sandbox` 与 cgroup 能力（详见 [架构说明](docs/architecture.md)）。
+- [Overview](#overview)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Configuration & environment variables](#configuration--environment-variables)
+- [HTTP API overview](#http-api-overview)
+- [ExecGo integration](#execgo-integration)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
-在 Agent 接入链路中，runtime 不理解自然语言，也不替代 Agent 的决策循环。它只接收明确的执行请求，并提供稳定的任务 ID、状态机、stdout/stderr、result、事件与资源/沙箱审计信息，让上层 Agent 可以把执行结果继续用于后续推理或回放。
+---
 
-一条任务的关键链路如下：
+## Overview
+
+`execgo-runtime` hosts an HTTP server in a single process and persists state via SQLite (WAL) and per-task directories. The scheduler dispatches queued work to **internal shim** child processes that run user commands or scripts. The runtime follows a single-binary, multi-capability design: it probes the host at startup, exposes a capability manifest, and resolves a requested/effective execution plan on each submit. It supports health/readiness probes, Prometheus metrics, task cancellation and timeouts, a local resource ledger, and optional `linux_sandbox` plus cgroup capabilities on Linux (see [Architecture](docs/architecture.md)).
+
+In an agent integration path, the runtime does not understand natural language and does not replace an agent's decision loop. It accepts explicit execution requests and returns stable task IDs, a state machine, stdout/stderr, results, events, and resource/sandbox audit data so upstream agents can continue reasoning or replay.
+
+A typical task lifecycle:
 
 ```text
 POST /api/v1/tasks
@@ -49,87 +49,87 @@ POST /api/v1/tasks
   -> GET status/events/metrics
 ```
 
-这意味着 runtime 的边界非常明确：HTTP 服务负责接收、调度、恢复和观测，internal shim 负责真实进程执行；上层 ExecGo/Agent 负责规划、重试策略和业务语义。
+The boundary is explicit: the HTTP service receives, schedules, recovers, and observes; the internal shim performs real process execution; upstream ExecGo/agents own planning, retry policy, and business semantics.
 
-## 功能特性
+## Features
 
-| 能力 | 说明 |
-|------|------|
-| HTTP API | 提交任务、查询状态、取消、事件流、健康检查、Prometheus 指标 |
+| Capability | Description |
+|------------|-------------|
+| HTTP API | Submit tasks, query status, cancel, event streams, health checks, Prometheus metrics |
 | CLI | `serve` / `submit` / `status` / `wait` / `kill` / `run` |
-| 持久化 | SQLite 元数据；`tasks/<id>/` 下 `request.json`、`result.json`、stdout/stderr |
-| 调度与恢复 | shim 子进程执行；重启后可对非终态任务做恢复相关处理 |
-| 自适应能力 | 环境探测、capability API、显式降级、requested/effective execution plan |
-| 资源与沙箱 | 默认进程级；Linux 可选 `linux_sandbox`（命名空间、cgroup 等）；本机 ResourceLedger 做 reservation/release |
-| 治理语义 | `control_context.tenant` 支持租户软配额聚合；`control_context.owner` 支持 owner-gated kill |
+| Persistence | SQLite metadata; `request.json`, `result.json`, stdout/stderr under `tasks/<id>/` |
+| Scheduling & recovery | Shim child-process execution; non-terminal tasks can be recovered after restart |
+| Adaptive capabilities | Host probing, capability API, explicit degradation, requested/effective execution plan |
+| Resources & sandbox | Process-level by default; optional `linux_sandbox` on Linux (namespaces, cgroups, etc.); local ResourceLedger for reservation/release |
+| Governance | `control_context.tenant` for soft tenant quotas; `control_context.owner` for owner-gated kill |
 
-## 环境要求
+## Requirements
 
-| 项目 | 说明 |
-|------|------|
-| Rust | **1.74+**（MSRV；建议当前 stable，与 CI 一致。`edition = "2021"` 表示语言 edition，不是 Rust 工具链版本） |
-| 操作系统 | 开发与 CI 覆盖 **Linux、macOS**；**沙箱 / cgroup 完整能力仅在 Linux** |
-| 平台 | 依赖 Unix 进程组、信号、`wait4` 等；**Windows 非目标平台** |
+| Item | Notes |
+|------|-------|
+| Rust | **1.74+** (MSRV; current stable recommended, aligned with CI. `edition = "2021"` is the language edition, not the toolchain version.) |
+| OS | Development and CI cover **Linux and macOS**; **full sandbox/cgroup capabilities are Linux-only** |
+| Platform | Relies on Unix process groups, signals, `wait4`, etc.; **Windows is not a target platform** |
 
-## 安装
+## Installation
 
-### 从 crates.io 安装
+### From crates.io
 
 ```bash
 cargo install execgo-runtime --version 1.1.0
 ```
 
-### 从源码构建（推荐）
+### From source (recommended)
 
 ```bash
 git clone https://github.com/iammm0/execgo-runtime.git
 cd execgo-runtime
 cargo build --release
-# 二进制：target/release/execgo-runtime
+# Binary: target/release/execgo-runtime
 ```
 
-### 容器镜像（可选）
+### Container image (optional)
 
-从 GitHub Container Registry 拉取（`main` 分支成功构建后可用）：
+Pull from GitHub Container Registry (available after successful `main` builds):
 
 ```bash
 docker pull ghcr.io/iammm0/execgo-runtime:latest
 docker run --rm -p 8080:8080 -v execgo-data:/data ghcr.io/iammm0/execgo-runtime:latest
 ```
 
-或从源码本地构建：
+Or build locally from source:
 
 ```bash
 docker build -t execgo-runtime:local .
 docker run --rm -p 8080:8080 -v execgo-data:/data execgo-runtime:local
 ```
 
-默认监听 `0.0.0.0:8080`，数据目录 `/data`。详见 [部署说明](docs/deployment.md)。
+Defaults: listen on `0.0.0.0:8080`, data directory `/data`. See [Deployment](docs/deployment.md).
 
-## 快速开始
+## Quick start
 
-### 编译与测试
+### Build & test
 
 ```bash
 cargo build --release
 cargo test
 ```
 
-### 启动服务
+### Start the server
 
 ```bash
 cargo run -- serve --listen-addr 127.0.0.1:8080 --data-dir ./data
 ```
 
-数据目录下会生成 `runtime.db` 与 `tasks/<task_id>/`。
+This creates `runtime.db` and `tasks/<task_id>/` under the data directory.
 
-### 提交示例任务
+### Submit a sample task
 
 ```bash
 cargo run -- submit --json '{"execution":{"kind":"command","program":"/bin/sh","args":["-c","echo hello"]}}'
 ```
 
-### 提交带治理信息的任务
+### Submit a task with governance metadata
 
 ```bash
 cargo run -- run --json '{
@@ -163,7 +163,7 @@ cargo run -- run --json '{
 }'
 ```
 
-运行结束后可查看：
+After the run completes:
 
 ```bash
 curl -sS http://127.0.0.1:8080/api/v1/runtime/resources
@@ -171,50 +171,50 @@ curl -sS http://127.0.0.1:8080/api/v1/tasks/<task_id>/events
 ls -la ./data/tasks/<task_id>
 ```
 
-如果任务带 `control_context.owner`，取消时需要传入匹配 owner：
+If the task sets `control_context.owner`, cancellation requires a matching owner:
 
 ```bash
 cargo run -- kill --owner local-user <task_id>
 ```
 
-### 一键演示
+### One-shot demo
 
 ```bash
 chmod +x scripts/quickstart.sh
 ./scripts/quickstart.sh
 ```
 
-在临时目录启动服务、提交任务并等待结束，退出时清理。
+Starts a server in a temp directory, submits a task, waits for completion, and cleans up on exit.
 
-### CLI 速查
+### CLI cheat sheet
 
-| 子命令 | 作用 |
-|--------|------|
-| `serve` | 启动 HTTP 服务（`serve --help` 查看全部参数） |
-| `submit` | 提交任务（`--json` 或 `--file`） |
-| `status <task_id>` | 查询状态 |
-| `wait <task_id>` | 轮询至终态（可选 `--timeout-ms`） |
-| `kill <task_id>` | 请求取消 |
-| `run` | 提交并等待完成（`submit` + `wait`） |
+| Subcommand | Purpose |
+|------------|---------|
+| `serve` | Start the HTTP server (`serve --help` for all flags) |
+| `submit` | Submit a task (`--json` or `--file`) |
+| `status <task_id>` | Query status |
+| `wait <task_id>` | Poll until terminal state (optional `--timeout-ms`) |
+| `kill <task_id>` | Request cancellation |
+| `run` | Submit and wait (`submit` + `wait`) |
 
-默认 `--server http://127.0.0.1:8080`。
+Default `--server http://127.0.0.1:8080`.
 
-## 配置与环境变量
+## Configuration & environment variables
 
-| 变量 | 说明 |
-|------|------|
-| `RUST_LOG` | 日志级别，如 `info`、`debug`；未设置时由程序默认 `tracing` 配置 |
-| `EXECGO_RUNTIME_URL` | **在 ExecGo 控制面**配置：指向本服务根 URL（无尾斜杠亦可） |
-| `EXECGO_RUNTIME_ID` | 可选：覆盖 runtime 节点 ID |
-| `EXECGO_RUNTIME_DEFAULT_CAPABILITY_MODE` | 可选：默认 capability 策略，`adaptive` 或 `strict` |
-| `EXECGO_RUNTIME_DISABLE_LINUX_SANDBOX` | 可选：禁用 Linux sandbox 探测能力 |
-| `EXECGO_RUNTIME_DISABLE_CGROUP` | 可选：禁用 cgroup 能力 |
-| `EXECGO_RUNTIME_CAPACITY_MEMORY_BYTES` / `EXECGO_RUNTIME_CAPACITY_PIDS` | 可选：覆盖 ResourceLedger 容量探测 |
-| `EXECGO_RUNTIME_OWNER` | 可选：CLI `kill` 默认 owner header |
+| Variable | Description |
+|----------|-------------|
+| `RUST_LOG` | Log level, e.g. `info`, `debug`; if unset, the default `tracing` configuration applies |
+| `EXECGO_RUNTIME_URL` | **On the ExecGo control plane**: root URL of this service (trailing slash optional) |
+| `EXECGO_RUNTIME_ID` | Optional: override runtime node ID |
+| `EXECGO_RUNTIME_DEFAULT_CAPABILITY_MODE` | Optional: default capability policy, `adaptive` or `strict` |
+| `EXECGO_RUNTIME_DISABLE_LINUX_SANDBOX` | Optional: disable Linux sandbox probing |
+| `EXECGO_RUNTIME_DISABLE_CGROUP` | Optional: disable cgroup capabilities |
+| `EXECGO_RUNTIME_CAPACITY_MEMORY_BYTES` / `EXECGO_RUNTIME_CAPACITY_PIDS` | Optional: override ResourceLedger capacity probing |
+| `EXECGO_RUNTIME_OWNER` | Optional: default owner header for CLI `kill` |
 
-服务端常用参数见 [CLI 文档](docs/cli.md)（并发上限、队列长度、GC、grace 时间等）。
+Common server flags are documented in [CLI reference](docs/cli.md) (concurrency limits, queue length, GC, grace periods, etc.).
 
-租户软配额通过 `serve --tenant-quota` 配置，例如：
+Configure soft tenant quotas via `serve --tenant-quota`, for example:
 
 ```bash
 cargo run -- serve \
@@ -223,73 +223,73 @@ cargo run -- serve \
   --tenant-quota demo=slots:2,memory:1073741824,pids:128
 ```
 
-配额只在任务设置了匹配的 `control_context.tenant` 时生效。
+Quotas apply only when tasks set a matching `control_context.tenant`.
 
-## HTTP API 概览
+## HTTP API overview
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `POST` | `/api/v1/tasks` | 提交任务 |
-| `GET` | `/api/v1/tasks/:id` | 任务状态（含输出片段） |
-| `POST` | `/api/v1/tasks/:id/kill` | 取消 |
-| `GET` | `/api/v1/tasks/:id/events` | 事件列表 |
-| `GET` | `/api/v1/runtime/info` | runtime ID、版本、启动时间与平台摘要 |
-| `GET` | `/api/v1/runtime/capabilities` | 宿主环境探测结果、基础语义、增强能力、降级告警 |
-| `GET` | `/api/v1/runtime/config` | 非敏感运行配置摘要 |
-| `GET` | `/api/v1/runtime/resources` | 本机资源 capacity/reserved/available 与活动 reservation |
-| `GET` | `/healthz` | 存活（响应中含 `version`） |
-| `GET` | `/readyz` | 就绪（校验存储） |
-| `GET` | `/metrics` | Prometheus 文本 |
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/tasks` | Submit a task |
+| `GET` | `/api/v1/tasks/:id` | Task status (includes output snippets) |
+| `POST` | `/api/v1/tasks/:id/kill` | Cancel |
+| `GET` | `/api/v1/tasks/:id/events` | Event list |
+| `GET` | `/api/v1/runtime/info` | Runtime ID, version, start time, platform summary |
+| `GET` | `/api/v1/runtime/capabilities` | Host probe results, base semantics, enhanced capabilities, degradation warnings |
+| `GET` | `/api/v1/runtime/config` | Non-sensitive runtime config summary |
+| `GET` | `/api/v1/runtime/resources` | Local capacity/reserved/available and active reservations |
+| `GET` | `/healthz` | Liveness (response includes `version`) |
+| `GET` | `/readyz` | Readiness (validates storage) |
+| `GET` | `/metrics` | Prometheus text |
 
-完整 JSON 模型与示例见 [API 参考](docs/api.md)。
+Full JSON models and examples: [API reference](docs/api.md).
 
-## 与 ExecGo 集成
+## ExecGo integration
 
-在 ExecGo 中设置环境变量：
+Set on the ExecGo control plane:
 
 ```text
 EXECGO_RUNTIME_URL=http://127.0.0.1:8080
 ```
 
-指向正在运行的 `execgo-runtime` 根地址；控制面通过该 URL 调用上述 API。
+Point this at the root URL of a running `execgo-runtime` instance; the control plane calls the APIs above through that URL.
 
-推荐链路：
+Recommended flow:
 
-1. 通用 Agent 通过 ExecGo adapter 提交结构化 action。
-2. ExecGo 将需要进程执行、资源限制或沙箱策略的 action 翻译为 `type=runtime` 任务。
-3. `execgo-runtime` 执行任务并持久化 request/result/stdout/stderr。
-4. ExecGo 将状态与结果归一化返回给 Agent，用于继续推理、重试、取消或审计。
+1. A general-purpose agent submits structured actions through an ExecGo adapter.
+2. ExecGo translates actions that need process execution, resource limits, or sandbox policy into `type=runtime` tasks.
+3. `execgo-runtime` executes the work and persists request/result/stdout/stderr.
+4. ExecGo normalizes status and results back to the agent for further reasoning, retry, cancellation, or audit.
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
-|------|------|
-| [docs/README.md](docs/README.md) | 文档索引 |
-| [docs/architecture.md](docs/architecture.md) | 架构与执行流程 |
-| [docs/api.md](docs/api.md) | HTTP API 与 JSON |
-| [docs/cli.md](docs/cli.md) | 命令行参数 |
-| [docs/deployment.md](docs/deployment.md) | 部署、Docker、CI/CD、标签 |
-| [docs/development.md](docs/development.md) | 本地开发、测试、风格 |
+| Doc | Contents |
+|-----|----------|
+| [docs/README.md](docs/README.md) | Documentation index |
+| [docs/architecture.md](docs/architecture.md) | Architecture and execution flow |
+| [docs/api.md](docs/api.md) | HTTP API and JSON models |
+| [docs/cli.md](docs/cli.md) | CLI flags |
+| [docs/deployment.md](docs/deployment.md) | Deployment, Docker, CI/CD, tags |
+| [docs/development.md](docs/development.md) | Local development, testing, style |
 
-## 参与贡献
+## Contributing
 
-欢迎通过 [Issues](https://github.com/iammm0/execgo-runtime/issues) 反馈缺陷与需求，通过 Pull Request 提交改动。
+Issues and feature requests are welcome via [GitHub Issues](https://github.com/iammm0/execgo-runtime/issues). Code changes via pull requests.
 
-建议流程：
+Suggested workflow:
 
-1. Fork 本仓库，从 `main` 创建分支。
-2. 本地执行 `cargo fmt`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`。
-3. 提交信息清晰说明**动机与行为变化**（可与 [development.md](docs/development.md) 对齐）。
-4. 发起 PR，等待 CI 通过后再合并。
+1. Fork the repo and branch from `main`.
+2. Run `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` locally.
+3. Write commit messages that explain **motivation and behavior changes** (aligned with [development.md](docs/development.md)).
+4. Open a PR and wait for CI to pass before merge.
 
-## 安全
+## Security
 
-若你认为发现了安全漏洞，请**不要**在公开 Issue 中讨论；请通过仓库维护者提供的私密渠道报告（可在 GitHub 用户主页或组织说明中查找联系方式）。在未有 `SECURITY.md` 前，也可先开 **私有** 沟通渠道联系维护者。
+If you believe you have found a security vulnerability, **do not** discuss it in a public issue. Report it through a private channel provided by the maintainers (contact details may appear on the GitHub user or organization profile). Until a `SECURITY.md` is published, reach out via a **private** communication channel.
 
-## 许可证
+## License
 
-本项目使用 `MIT` 许可证发布，完整条款见仓库根目录的 `LICENSE` 文件。
+This project is released under the MIT License. See the `LICENSE` file in the repository root.
 
 ---
 
-**仓库**：<https://github.com/iammm0/execgo-runtime>
+**Repository**: <https://github.com/iammm0/execgo-runtime>
